@@ -2,7 +2,8 @@
 
 A native macOS app that records, dictates, and transcribes locally on your Mac
 — no audio leaves the device. Hebrew transcription is powered by the
-[ivrit.ai](https://huggingface.co/ivrit-ai) fine-tunes of Whisper, English by
+[ivrit.ai `large-v3` finetune](https://huggingface.co/ivrit-ai/whisper-large-v3-ggml)
+of Whisper, English by
 [OpenAI's `large-v3-turbo`](https://huggingface.co/ggerganov/whisper.cpp), both
 running through `whisper.cpp` (GPU via Metal).
 
@@ -14,10 +15,10 @@ running through `whisper.cpp` (GPU via Metal).
 - **Record meetings** = mic + system audio mixed into one mono 16 kHz WAV file.
 - **Dictate in two languages** with separate global hotkeys:
     - `⌘2` — English dictation (OpenAI `large-v3-turbo`)
-    - `⌘3` — Hebrew dictation (ivrit.ai `large-v3-turbo`)
+    - `⌘3` — Hebrew dictation (ivrit.ai `large-v3`)
   Both hotkeys are user-configurable in **Settings → Hotkeys**.
-- **Transcribe locally**: ivrit.ai `large-v3-turbo`, ivrit.ai `large-v3`, or
-  OpenAI `large-v3-turbo`. Audio never leaves your Mac.
+- **Transcribe locally**: ivrit.ai `large-v3` (Hebrew) or OpenAI
+  `large-v3-turbo` (English / multilingual). Audio never leaves your Mac.
 - Per-segment timestamps, click to seek, copy/share transcript, RTL rendering
   for Hebrew.
 
@@ -26,7 +27,7 @@ running through `whisper.cpp` (GPU via Metal).
 - macOS 14 (Sonoma) or newer.
 - Xcode 15.3 or newer (Command Line Tools alone are not enough).
 - Homebrew (used to install [`xcodegen`](https://github.com/yonaskolb/XcodeGen)).
-- ~3.2 GB of disk for both default ggml models.
+- ~4.6 GB of disk for both default ggml models.
 
 ## Build & run
 
@@ -52,8 +53,12 @@ release. The checksum is pinned in `Packages/WhisperBinary/Package.swift`.
 
 On first launch the app downloads both default models in the background:
 
-- `ivrit-ai/whisper-large-v3-turbo-ggml` — Hebrew (1.6 GB)
-- `openai whisper-large-v3-turbo` (the `ggerganov/whisper.cpp` build) — English (1.6 GB)
+- `ivrit-ai/whisper-large-v3-ggml` — Hebrew (~3.0 GB). Empirically more
+  accurate on Hebrew speech than the smaller `large-v3-turbo` finetune,
+  which is why we ship the larger one despite the size and ~2× inference
+  cost.
+- `openai whisper-large-v3-turbo` (the `ggerganov/whisper.cpp` build) —
+  English / multilingual (~1.6 GB).
 
 You can monitor progress in the in-app banner or pre-download from the CLI:
 
@@ -65,7 +70,7 @@ Models live at:
 
 ```
 ~/Library/Application Support/IslandWhisper/Models/
-    ivrit-ai-whisper-large-v3-turbo.bin
+    ivrit-ai-whisper-large-v3.bin
     openai-whisper-large-v3-turbo.bin
 ```
 

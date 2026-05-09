@@ -26,9 +26,11 @@ final class ModelManagerTests: XCTestCase {
         super.tearDown()
     }
 
-    func test_catalog_contains_ivrit_turbo_as_default_selected_model() {
+    func test_catalog_contains_ivrit_large_as_default_selected_model() {
         let mgr = ModelManager(modelsDirectory: tempRoot)
         XCTAssertNotNil(mgr.selectedModel())
+        XCTAssertEqual(mgr.selectedModelName, WhisperModel.ivritLarge.name,
+                       "Default selection should be the ivrit.ai large-v3 Hebrew model")
         XCTAssertEqual(WhisperModel.all.contains { $0.name.contains("ivrit") },
                        true,
                        "Expected at least one ivrit.ai model in the catalog")
@@ -47,22 +49,22 @@ final class ModelManagerTests: XCTestCase {
 
     func test_url_for_model_lives_under_models_directory() {
         let mgr = ModelManager(modelsDirectory: tempRoot)
-        let url = mgr.url(for: WhisperModel.ivritTurbo)
+        let url = mgr.url(for: WhisperModel.ivritLarge)
         XCTAssertEqual(url.deletingLastPathComponent().path, tempRoot.path)
-        XCTAssertEqual(url.lastPathComponent, "ivrit-ai-whisper-large-v3-turbo.bin")
+        XCTAssertEqual(url.lastPathComponent, "ivrit-ai-whisper-large-v3.bin")
     }
 
     func test_install_state_reflects_files_in_directory() throws {
         let mgr = ModelManager(modelsDirectory: tempRoot)
-        XCTAssertFalse(mgr.isInstalled(.ivritTurbo))
+        XCTAssertFalse(mgr.isInstalled(.ivritLarge))
 
-        let path = mgr.url(for: .ivritTurbo)
+        let path = mgr.url(for: .ivritLarge)
         try Data("not-a-real-model".utf8).write(to: path)
         mgr.refreshInstalled()
-        XCTAssertTrue(mgr.isInstalled(.ivritTurbo))
+        XCTAssertTrue(mgr.isInstalled(.ivritLarge))
 
-        try mgr.delete(.ivritTurbo)
-        XCTAssertFalse(mgr.isInstalled(.ivritTurbo))
+        try mgr.delete(.ivritLarge)
+        XCTAssertFalse(mgr.isInstalled(.ivritLarge))
     }
 
     func test_set_selected_persists_choice() {
@@ -75,8 +77,8 @@ final class ModelManagerTests: XCTestCase {
     }
 
     func test_best_model_for_language_routes_hebrew_to_ivrit() {
-        XCTAssertEqual(WhisperModel.bestModel(for: "he"), .ivritTurbo)
-        XCTAssertEqual(WhisperModel.bestModel(for: "iw"), .ivritTurbo)
+        XCTAssertEqual(WhisperModel.bestModel(for: "he"), .ivritLarge)
+        XCTAssertEqual(WhisperModel.bestModel(for: "iw"), .ivritLarge)
         XCTAssertEqual(WhisperModel.bestModel(for: "en"), .openaiTurbo)
         XCTAssertEqual(WhisperModel.bestModel(for: "auto"), .openaiTurbo)
     }
@@ -89,7 +91,7 @@ final class ModelManagerTests: XCTestCase {
         mgr.refreshInstalled()
         mgr.setSelected(.openaiTurbo)
 
-        // Hebrew best is ivritTurbo (not installed) so we should fall back.
+        // Hebrew best is ivritLarge (not installed) so we should fall back.
         let resolved = mgr.model(for: "he")
         XCTAssertEqual(resolved, .openaiTurbo)
     }

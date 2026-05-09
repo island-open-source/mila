@@ -20,7 +20,7 @@ final class DictationControllerTests: XCTestCase {
         store = RecordingStore(rootDirectory: tempRoot)
         manager = ModelManager(modelsDirectory: tempRoot.appendingPathComponent("Models"))
         savedSelection = UserDefaults.standard.string(forKey: "selectedModelName")
-        try TestSupport.installFakeModel(into: manager, model: .ivritTurbo)
+        try TestSupport.installFakeModel(into: manager, model: .ivritLarge)
         try TestSupport.installFakeModel(into: manager, model: .openaiTurbo)
         stub = StubWhisperEngine()
         service = TranscriptionService(store: store, modelManager: manager, engine: stub)
@@ -46,7 +46,7 @@ final class DictationControllerTests: XCTestCase {
     /// "selected" globally. This is the dictation-language plumbing the new
     /// per-language hotkeys depend on.
     func test_transcribe_once_uses_language_specific_model() async {
-        manager.setSelected(.ivritTurbo)
+        manager.setSelected(.ivritLarge)
         await stub.setDefaultCanned([
             TranscriptSegment(start: 0, end: 1, text: "hello world")
         ])
@@ -71,8 +71,8 @@ final class DictationControllerTests: XCTestCase {
 
         let loaded = await stub.loadedModel
         XCTAssertEqual(loaded?.lastPathComponent,
-                       manager.url(for: .ivritTurbo).lastPathComponent,
-                       "Hebrew dictation must load the ivrit.ai turbo model")
+                       manager.url(for: .ivritLarge).lastPathComponent,
+                       "Hebrew dictation must load the ivrit.ai large-v3 model")
     }
 
     /// The TranscriptionService must forward `shutdown` to the engine. This

@@ -10,21 +10,13 @@ struct WhisperModel: Identifiable, Hashable, Codable {
     var sizeBytes: Int64
     var languageHint: String
 
-    /// Hebrew default. Same size class as the OpenAI English turbo, finetuned
-    /// on Hebrew speech so it noticeably outperforms multilingual on Hebrew.
-    static let ivritTurbo = WhisperModel(
-        name: "ivrit-ai-whisper-large-v3-turbo",
-        displayName: "ivrit.ai · large-v3-turbo (Hebrew)",
-        url: URL(string: "https://huggingface.co/ivrit-ai/whisper-large-v3-turbo-ggml/resolve/main/ggml-model.bin")!,
-        sizeBytes: 1_624_555_275,
-        languageHint: "he"
-    )
-
-    /// Higher-accuracy Hebrew option for users willing to pay ~3 GB and ~2x
-    /// inference time vs. turbo.
+    /// Hebrew default. The full ivrit.ai `large-v3` finetune (~3 GB, ~2x
+    /// slower than the turbo variant). Empirically noticeably more accurate
+    /// than the turbo finetune on Hebrew speech, which is why we ship it as
+    /// the default despite the size and latency cost.
     static let ivritLarge = WhisperModel(
         name: "ivrit-ai-whisper-large-v3",
-        displayName: "ivrit.ai · large-v3 (Hebrew, max accuracy)",
+        displayName: "ivrit.ai · large-v3 (Hebrew)",
         url: URL(string: "https://huggingface.co/ivrit-ai/whisper-large-v3-ggml/resolve/main/ggml-model.bin")!,
         sizeBytes: 3_094_023_488,
         languageHint: "he"
@@ -42,15 +34,15 @@ struct WhisperModel: Identifiable, Hashable, Codable {
         languageHint: "en"
     )
 
-    static let all: [WhisperModel] = [.ivritTurbo, .ivritLarge, .openaiTurbo]
+    static let all: [WhisperModel] = [.ivritLarge, .openaiTurbo]
 
     /// Pick the best model the catalog knows about for a given ISO language
-    /// code. Hebrew goes to ivrit.ai; everything else (including the dictation
-    /// English path) goes to the OpenAI turbo.
+    /// code. Hebrew goes to ivrit.ai's large-v3 finetune; everything else
+    /// (including the dictation English path) goes to the OpenAI turbo.
     static func bestModel(for languageCode: String) -> WhisperModel {
         switch languageCode.lowercased() {
         case "he", "he-il", "iw":
-            return .ivritTurbo
+            return .ivritLarge
         default:
             return .openaiTurbo
         }
@@ -76,7 +68,7 @@ final class ModelManager: NSObject, ObservableObject {
     init(modelsDirectory: URL) {
         self.modelsDirectory = modelsDirectory
         let lastUsed = UserDefaults.standard.string(forKey: "selectedModelName")
-        self.selectedModelName = lastUsed ?? WhisperModel.ivritTurbo.name
+        self.selectedModelName = lastUsed ?? WhisperModel.ivritLarge.name
         super.init()
         try? FileManager.default.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
         refreshInstalled()

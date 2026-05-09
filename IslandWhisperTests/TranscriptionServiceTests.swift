@@ -55,7 +55,7 @@ final class TranscriptionServiceTests: XCTestCase {
         XCTAssertEqual(stored.status, .completed)
         XCTAssertEqual(stored.fullText, "שלום")
         XCTAssertEqual(stored.segments.count, 1)
-        XCTAssertEqual(stored.modelName, WhisperModel.ivritTurbo.displayName)
+        XCTAssertEqual(stored.modelName, WhisperModel.ivritLarge.displayName)
         XCTAssertNil(service.activeRecordingID)
         XCTAssertTrue(service.pendingIDs.isEmpty)
     }
@@ -313,8 +313,8 @@ final class TranscriptionServiceTests: XCTestCase {
     // MARK: - Model gating
 
     func test_no_model_installed_marks_recording_failed() async throws {
-        try manager.delete(.ivritTurbo)
-        XCTAssertFalse(manager.isInstalled(.ivritTurbo))
+        try manager.delete(.ivritLarge)
+        XCTAssertFalse(manager.isInstalled(.ivritLarge))
 
         let fixture = try TestRecordingFixture.make(in: store, title: "Skipped")
         service.enqueue(fixture.recording)
@@ -370,7 +370,7 @@ final class TranscriptionServiceTests: XCTestCase {
         await service.waitForIdle()
         let firstLoad = await stub.loadedModel
         XCTAssertEqual(firstLoad?.lastPathComponent,
-                       manager.url(for: .ivritTurbo).lastPathComponent,
+                       manager.url(for: .ivritLarge).lastPathComponent,
                        "First pass should hit the Hebrew model")
 
         var swapped = try XCTUnwrap(store.recordings.first { $0.id == fixture.recording.id })

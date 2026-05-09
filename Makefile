@@ -52,10 +52,10 @@ run: build
 
 models:
 	@mkdir -p "$(HOME)/Library/Application Support/IslandWhisper/Models"
-	@echo "Downloading ivrit-ai/whisper-large-v3-turbo-ggml (~1.6GB). Press Ctrl-C to abort."
+	@echo "Downloading ivrit-ai/whisper-large-v3-ggml (~3GB). Press Ctrl-C to abort."
 	curl -L --fail --progress-bar \
-		"https://huggingface.co/ivrit-ai/whisper-large-v3-turbo-ggml/resolve/main/ggml-model.bin" \
-		-o "$(HOME)/Library/Application Support/IslandWhisper/Models/ivrit-ai-whisper-large-v3-turbo.bin"
+		"https://huggingface.co/ivrit-ai/whisper-large-v3-ggml/resolve/main/ggml-model.bin" \
+		-o "$(HOME)/Library/Application Support/IslandWhisper/Models/ivrit-ai-whisper-large-v3.bin"
 	@echo "Downloading openai/whisper-large-v3-turbo (~1.6GB). Press Ctrl-C to abort."
 	curl -L --fail --progress-bar \
 		"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin" \

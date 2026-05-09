@@ -89,14 +89,14 @@ struct IslandWhisperApp: App {
     }
 
     /// Pre-download the two default models on first launch:
-    ///   - ivrit.ai turbo (Hebrew dictation)
-    ///   - OpenAI turbo (English dictation)
-    /// Both are ~1.6 GB. We start them in parallel — `ModelManager` queues
-    /// them through the same `URLSession` so they don't actually saturate the
-    /// network, and the in-app banner shows whichever is currently selected.
+    ///   - ivrit.ai large-v3 (Hebrew dictation, ~3 GB)
+    ///   - OpenAI turbo (English dictation, ~1.6 GB)
+    /// We start them in parallel — `ModelManager` queues them through the
+    /// same `URLSession` so they don't actually saturate the network, and
+    /// the in-app banner shows whichever is currently selected.
     private func ensureDefaultModelsInstalled() {
-        modelManager.setSelected(WhisperModel.ivritTurbo)
-        for model in [WhisperModel.ivritTurbo, WhisperModel.openaiTurbo] {
+        modelManager.setSelected(WhisperModel.ivritLarge)
+        for model in [WhisperModel.ivritLarge, WhisperModel.openaiTurbo] {
             if !modelManager.isInstalled(model) && modelManager.downloads[model.name] == nil {
                 modelManager.download(model)
             }
