@@ -61,7 +61,7 @@ final class RecordingSession: ObservableObject {
 
         if source == .microphone || source == .meeting {
             _ = await mic.requestAccess()
-            try mic.start()
+            try await mic.start()
             micTask = Task { [weak self] in
                 guard let self else { return }
                 for await buf in self.mic.audioStream {
@@ -95,7 +95,7 @@ final class RecordingSession: ObservableObject {
     func stop() async -> URL? {
         guard state == .recording else { return fileURL }
         state = .stopping
-        mic.stop()
+        await mic.stop()
         await system.stop()
         micTask?.cancel(); micTask = nil
         systemTask?.cancel(); systemTask = nil
@@ -117,7 +117,7 @@ final class RecordingSession: ObservableObject {
     /// pinned by a half-running session.
     func cancelAll() async {
         guard state != .idle else { return }
-        mic.stop()
+        await mic.stop()
         await system.stop()
         micTask?.cancel(); micTask = nil
         systemTask?.cancel(); systemTask = nil

@@ -26,6 +26,13 @@ final class DictationController: ObservableObject {
     private var samples: [Float] = []
     private var streamTask: Task<Void, Never>?
 
+    /// The app that was frontmost when this dictation started. Captured at
+    /// `start(action:)` time and re-activated at `paste(_:)` time so the
+    /// synthesized ⌘V always lands in the user's intended app — never in
+    /// IslandWhisper itself, even if focus shifted to us during recording
+    /// (e.g. the user clicked back into the IslandWhisper window mid-take).
+    private var targetApp: NSRunningApplication?
+
     private let store: RecordingStore
     private let transcription: TranscriptionService
     private let hotkeySettings: HotkeySettings
@@ -74,9 +81,10 @@ final class DictationController: ObservableObject {
     /// during graceful shutdown.
     func cancelInFlight() async {
         guard case .recording = state else { return }
-        recorder.stop()
+        await recorder.stop()
         streamTask?.cancel(); streamTask = nil
         samples.removeAll(keepingCapacity: true)
+        targetApp = nil
         DictationOverlayWindow.shared.hide()
         state = .idle
         level = 0
@@ -85,13 +93,34 @@ final class DictationController: ObservableObject {
     // MARK: - Recording
 
     private func start(action: HotkeyAction) async {
+        // Snapshot the user's frontmost app FIRST, before we touch any UI or
+        // the audio engine. Even though our overlay is a non-activating
+        // panel, the user might click into IslandWhisper mid-take, and we
+        // need to know where to put the result regardless.
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        if let frontmost = NSWorkspace.shared.frontmostApplication,
+           frontmost.processIdentifier != myPID {
+            targetApp = frontmost
+        } else {
+            targetApp = nil
+        }
+
+        // Trigger the AX permission prompt on first dictation if we're not
+        // trusted yet. This pops the system dialog + adds us to the
+        // Accessibility list. macOS requires a relaunch after the user
+        // toggles us on for trust to actually apply, so the first dictation
+        // after install will still hit the missing-permission fallback path.
+        if !AccessibilityPermission.isTrusted() {
+            AccessibilityPermission.requestPromptIfNeeded()
+        }
+
         guard await recorder.requestAccess() else {
             NSSound.beep()
             return
         }
         samples.removeAll(keepingCapacity: true)
         do {
-            try recorder.start()
+            try await recorder.start()
         } catch {
             NSSound.beep()
             return
@@ -114,7 +143,7 @@ final class DictationController: ObservableObject {
     }
 
     private func stopAndTranscribe(action: HotkeyAction) async {
-        recorder.stop()
+        await recorder.stop()
         streamTask?.cancel(); streamTask = nil
         state = .transcribing(action)
         DictationOverlayWindow.shared.setBusy(true)
@@ -201,23 +230,62 @@ final class DictationController: ObservableObject {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
 
+        // Without Accessibility trust, CGEvent.post is silently dropped by
+        // macOS — the user would see "I dictated, nothing happened" with no
+        // explanation. Surface a one-shot alert and leave the text on the
+        // clipboard so they can paste manually with ⌘V.
+        guard AccessibilityPermission.isTrusted() else {
+            AccessibilityPermission.notifyMissing()
+            // Do NOT restore the prior clipboard contents — the transcript
+            // is the user's only path to the dictated text right now.
+            targetApp = nil
+            return
+        }
+
+        // Re-activate the user's intended app so the synthesized ⌘V lands
+        // there instead of in IslandWhisper itself. If the captured target
+        // is gone (quit during recording) we fall through and the paste
+        // hits whatever app is currently frontmost — best effort.
+        let captured = targetApp
+        targetApp = nil
+        if let target = captured, !target.isTerminated, !target.isActive {
+            target.activate()
+        }
+
+        // Give the OS ~120ms to actually move focus to the target app
+        // before posting the keystrokes; otherwise the synthesized events
+        // can race the activation and land in the previously-frontmost
+        // window instead.
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(120)) {
+            Self.postCommandV()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                if let prior = priorContents {
+                    pasteboard.clearContents()
+                    pasteboard.setString(prior, forType: .string)
+                }
+            }
+        }
+    }
+
+    /// Synthesize a Cmd+V at the HID event-tap level. Requires the process
+    /// to be Accessibility-trusted; the caller is responsible for that
+    /// check (see `AccessibilityPermission.isTrusted()`).
+    private static func postCommandV() {
         let src = CGEventSource(stateID: .hidSystemState)
         let cmdDown = CGEvent(keyboardEventSource: src, virtualKey: 0x37, keyDown: true)
-        let vDown = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: true)
-        let vUp = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: false)
-        let cmdUp = CGEvent(keyboardEventSource: src, virtualKey: 0x37, keyDown: false)
-        vDown?.flags = .maskCommand
-        vUp?.flags = .maskCommand
+        let vDown   = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: true)
+        let vUp     = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: false)
+        let cmdUp   = CGEvent(keyboardEventSource: src, virtualKey: 0x37, keyDown: false)
+        // Some apps inspect the event flags rather than the global modifier
+        // state. Setting the Command flag on every event in the sequence is
+        // the most defensive thing we can do.
+        cmdDown?.flags = .maskCommand
+        vDown?.flags   = .maskCommand
+        vUp?.flags     = .maskCommand
+        cmdUp?.flags   = .maskCommand
         cmdDown?.post(tap: .cghidEventTap)
         vDown?.post(tap: .cghidEventTap)
         vUp?.post(tap: .cghidEventTap)
         cmdUp?.post(tap: .cghidEventTap)
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            if let prior = priorContents {
-                pasteboard.clearContents()
-                pasteboard.setString(prior, forType: .string)
-            }
-        }
     }
 }
