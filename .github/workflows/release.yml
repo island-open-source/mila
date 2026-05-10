@@ -62,11 +62,46 @@ jobs:
           rm -rf ~/Library/org.swift.swiftpm
           rm -rf ~/Library/Developer/Xcode/DerivedData/SourcePackages
 
+      # Import the self-signed code-signing cert (a one-time-generated, never-
+      # rotated identity stored in repo secrets) into a temp keychain so
+      # `make-dmg.sh` can sign the release with a STABLE designated
+      # requirement. macOS TCC permissions (Accessibility, mic, etc.) are
+      # keyed by the cert's SHA1 fingerprint; signing every release with the
+      # same cert means users keep their granted permissions across upgrades
+      # instead of having to re-grant on every release.
+      - name: Set up code signing
+        env:
+          P12_BASE64: ${{ secrets.MACOS_CODESIGN_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CODESIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+          P12_PATH="$RUNNER_TEMP/cert.p12"
+
+          echo "$P12_BASE64" | base64 -d > "$P12_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$P12_PATH" -k "$KEYCHAIN_PATH" -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security -A
+          # Make the temp keychain searchable alongside the runner's defaults
+          # and grant codesign access to the private key without prompting.
+          security list-keychains -d user -s "$KEYCHAIN_PATH" \
+            $(security list-keychains -d user | sed 's/"//g')
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          rm -f "$P12_PATH"
+
       - name: Build Release
         run: make release-build
 
       - name: Package DMG
         id: dmg
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
         run: |
           DMG="IslandWhisper-${{ steps.version.outputs.version }}.dmg"
           ./scripts/make-dmg.sh \
@@ -75,6 +110,15 @@ jobs:
             "${{ steps.version.outputs.version }}"
           ls -la "${DMG}"
           echo "dmg=${DMG}" >> "$GITHUB_OUTPUT"
+          # Sanity check: every release MUST be signed by our self-signed
+          # identity, otherwise TCC permissions will reset for users on
+          # upgrade — the entire point of the cert.
+          codesign -dvvv "build-release/Build/Products/Release/IslandWhisper.app" 2>&1 | grep -E "Authority|TeamIdentifier|CDHash"
+
+      - name: Clean up keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/build.keychain-db" || true
 
       - name: Create GitHub Release and upload DMG
         env:

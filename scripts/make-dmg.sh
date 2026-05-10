@@ -28,9 +28,15 @@ trap 'rm -rf "$STAGE"' EXIT
 cp -R "$APP_PATH" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 
-# Re-sign the bundle ad-hoc to make sure the embedded `whisper.framework` and
-# the wrapping app stay in sync after the cp -R above.
-codesign --force --deep --sign - "$STAGE/$(basename "$APP_PATH")" 2>/dev/null || true
+# Re-sign the bundle to make sure the embedded `whisper.framework` and the
+# wrapping app stay in sync after the cp -R above. Honors `CODESIGN_IDENTITY`
+# so CI can sign with our self-signed Developer-ID-equivalent cert (its
+# SHA1 fingerprint is the trust anchor for TCC permissions across releases —
+# every build signed with the SAME cert keeps the user's previously-granted
+# Accessibility / mic permissions). Defaults to ad-hoc ("-") for local
+# builds where the cert isn't in keychain.
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+codesign --force --deep --sign "$CODESIGN_IDENTITY" "$STAGE/$(basename "$APP_PATH")"
 
 VOLNAME="IslandWhisper $VERSION"
 TMP_DMG="$(mktemp -t IslandWhisperDMG.XXXXXX).dmg"
