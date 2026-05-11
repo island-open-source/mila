@@ -1,5 +1,33 @@
 import SwiftUI
 import AppKit
+import Combine
+import Sparkle
+
+/// Wraps Sparkle's `SPUStandardUpdaterController` so SwiftUI menu items can
+/// observe `canCheckForUpdates` and disable themselves while a check is
+/// already in flight. Created once at app launch — Sparkle starts its
+/// scheduled background poll immediately (interval comes from
+/// `SUScheduledCheckInterval` in Info.plist).
+@MainActor
+final class UpdaterViewModel: ObservableObject {
+    let controller: SPUStandardUpdaterController
+    @Published var canCheckForUpdates = false
+
+    init() {
+        controller = SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: nil
+        )
+        controller.updater.publisher(for: \.canCheckForUpdates)
+            .receive(on: DispatchQueue.main)
+            .assign(to: &$canCheckForUpdates)
+    }
+
+    func checkForUpdates() {
+        controller.checkForUpdates(nil)
+    }
+}
 
 @main
 struct IslandWhisperApp: App {
@@ -13,6 +41,7 @@ struct IslandWhisperApp: App {
     @StateObject private var session: RecordingSession
     @StateObject private var hotkeySettings: HotkeySettings
     @StateObject private var languageSettings: RecordingLanguageSettings
+    @StateObject private var updater = UpdaterViewModel()
 
     init() {
         let store = RecordingStore()
@@ -53,6 +82,12 @@ struct IslandWhisperApp: App {
                 .onAppear { wireDelegate() }
         }
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    updater.checkForUpdates()
+                }
+                .disabled(!updater.canCheckForUpdates)
+            }
             CommandGroup(replacing: .newItem) {
                 Button("New Voice Memo") {
                     Task { await actions.toggleVoiceMemo() }

@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: write   # required to upload release assets
+  id-token: write   # required for AWS OIDC role assumption (S3 upload)
 
 jobs:
   release:
@@ -36,9 +37,14 @@ jobs:
           else
             VERSION="${{ github.event.inputs.version }}"
           fi
+          # Sparkle keys appcast entries by CFBundleVersion (the build number),
+          # so we read it directly from the source-of-truth Info.plist rather
+          # than re-deriving from the tag.
+          BUILD=$(/usr/libexec/PlistBuddy -c "Print CFBundleVersion" IslandWhisper/Resources/Info.plist)
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Building version: ${VERSION}"
+          echo "build=${BUILD}" >> "$GITHUB_OUTPUT"
+          echo "Building version: ${VERSION} (build ${BUILD})"
 
       - name: Show toolchain
         run: |
@@ -112,13 +118,92 @@ jobs:
           echo "dmg=${DMG}" >> "$GITHUB_OUTPUT"
           # Sanity check: every release MUST be signed by our self-signed
           # identity, otherwise TCC permissions will reset for users on
-          # upgrade — the entire point of the cert.
-          codesign -dvvv "build-release/Build/Products/Release/IslandWhisper.app" 2>&1 | grep -E "Authority|TeamIdentifier|CDHash"
+          # upgrade — the entire point of the cert. We verify the *shipped*
+          # bundle (the one inside the DMG, post-make-dmg.sh re-sign), not
+          # the pre-DMG xcodebuild output which is still ad-hoc by design.
+          #
+          # `-plist` parsed via plistlib because the volume name make-dmg.sh
+          # sets ("IslandWhisper $VERSION") contains a space, so the older
+          # `awk '{print $NF}'` parsing of the human-readable output would
+          # only capture the version suffix and look for the app bundle on a
+          # nonexistent path. (per Cursor Bugbot review on PR #1)
+          MOUNT=$(hdiutil attach "${DMG}" -nobrowse -noautoopen -plist | python3 -c '
+import plistlib, sys
+d = plistlib.loads(sys.stdin.buffer.read())
+for e in d["system-entities"]:
+    mp = e.get("mount-point")
+    if mp:
+        print(mp); break
+')
+          if [ -z "$MOUNT" ] || [ ! -d "$MOUNT/IslandWhisper.app" ]; then
+            echo "error: failed to resolve DMG mount point (got: '$MOUNT')" >&2
+            exit 1
+          fi
+          codesign -dvvv "${MOUNT}/IslandWhisper.app" 2>&1 | grep -E "Authority|TeamIdentifier|CDHash"
+          codesign -d -r- "${MOUNT}/IslandWhisper.app" 2>&1 | grep designated
+          hdiutil detach "${MOUNT}" -quiet
 
       - name: Clean up keychain
         if: always()
         run: |
           security delete-keychain "$RUNNER_TEMP/build.keychain-db" || true
+
+      - name: Configure AWS credentials (for Sparkle update server upload)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.ISLAND_WHISPER_AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Sign DMG with Sparkle EdDSA + publish to update server
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          BUCKET: island-whisper-updates
+          FEED_URL_BASE: https://island-whisper-updates.internal.island.io
+        run: |
+          set -euo pipefail
+          DMG="${{ steps.dmg.outputs.dmg }}"
+          # Sparkle's CLI tools are checked out by SPM during the release
+          # build above, into the derived-data SourcePackages/artifacts/
+          # tree. They are not part of the IslandWhisper.app bundle.
+          SPARKLE_BIN="build-release/SourcePackages/artifacts/sparkle/Sparkle/bin"
+
+          # `sign_update --ed-key-file -` reads the EdDSA private key from
+          # stdin, computes the Ed25519 signature over the DMG bytes, and
+          # prints `sparkle:edSignature="..." length="..."` ready to drop
+          # into the appcast <enclosure>.
+          SIG_LINE=$(printf '%s' "$SPARKLE_PRIVATE_KEY" | "$SPARKLE_BIN/sign_update" --ed-key-file - "$DMG")
+          echo "sign_update -> $SIG_LINE"
+          SIG=$(printf '%s' "$SIG_LINE" | sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p')
+          LEN=$(printf '%s' "$SIG_LINE" | sed -n 's/.*length="\([^"]*\)".*/\1/p')
+          if [ -z "$SIG" ] || [ -z "$LEN" ]; then
+            echo "error: could not parse signature/length from sign_update output" >&2
+            exit 1
+          fi
+
+          # Pull the live appcast (a plain object in S3); the first ever
+          # release will 404, in which case update-appcast.py just initialises
+          # an empty feed with the same schema.
+          aws s3 cp "s3://${BUCKET}/appcast.xml" appcast.xml \
+            || echo "no existing appcast — starting fresh"
+
+          python3 scripts/update-appcast.py \
+            --version "${{ steps.version.outputs.version }}" \
+            --build "${{ steps.version.outputs.build }}" \
+            --dmg-name "$DMG" \
+            --signature "$SIG" \
+            --length "$LEN" \
+            --feed-url-base "$FEED_URL_BASE" \
+            --appcast-in appcast.xml \
+            --appcast-out appcast.xml
+
+          # Upload the DMG first so a Sparkle client that polls the feed
+          # the instant we finish always finds the file referenced by the
+          # appcast it just downloaded.
+          aws s3 cp "$DMG" "s3://${BUCKET}/${DMG}" \
+            --content-type application/octet-stream
+          aws s3 cp appcast.xml "s3://${BUCKET}/appcast.xml" \
+            --content-type "application/xml; charset=utf-8" \
+            --cache-control "max-age=300"
 
       - name: Create GitHub Release and upload DMG
         env:

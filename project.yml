@@ -17,12 +17,15 @@ settings:
     SWIFT_STRICT_CONCURRENCY: minimal
     GENERATE_INFOPLIST_FILE: NO
     PRODUCT_BUNDLE_IDENTIFIER: io.island.whisper.IslandWhisper
-    MARKETING_VERSION: "1.2.2"
-    CURRENT_PROJECT_VERSION: "5"
+    MARKETING_VERSION: "1.2.3"
+    CURRENT_PROJECT_VERSION: "6"
 
 packages:
   WhisperBinary:
     path: Packages/WhisperBinary
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: 2.9.1
 
 targets:
   IslandWhisper:
@@ -41,8 +44,8 @@ targets:
       properties:
         CFBundleName: IslandWhisper
         CFBundleDisplayName: Island Whisper
-        CFBundleShortVersionString: "1.2.2"
-        CFBundleVersion: "5"
+        CFBundleShortVersionString: "1.2.3"
+        CFBundleVersion: "6"
         LSMinimumSystemVersion: "14.0"
         LSApplicationCategoryType: public.app-category.productivity
         NSHumanReadableCopyright: ""
@@ -52,6 +55,10 @@ targets:
         NSSpeechRecognitionUsageDescription: "IslandWhisper transcribes locally on your Mac; no audio is sent to the cloud."
         NSPrincipalClass: NSApplication
         LSUIElement: false
+        SUFeedURL: https://island-whisper-updates.internal.island.io/appcast.xml
+        SUPublicEDKey: iF35blPidKUXIaLr59fJgGGdXtI8AgVNxOx5w+eTieY=
+        SUEnableAutomaticChecks: true
+        SUScheduledCheckInterval: 86400
     entitlements:
       path: IslandWhisper/Resources/IslandWhisper.entitlements
       properties:
@@ -65,6 +72,8 @@ targets:
     dependencies:
       - package: WhisperBinary
         product: Whisper
+      - package: Sparkle
+        product: Sparkle
     settings:
       base:
         OTHER_LDFLAGS: "$(inherited) -framework Accelerate -framework Metal -framework MetalKit"
