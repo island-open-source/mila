@@ -27,17 +27,21 @@ Before tagging:
 
 - [ ] `main` is green in CI (`gh run list --workflow=CI.yml --branch=main --limit=1`).
 - [ ] `make test` passes locally.
-- [ ] Version is bumped in **two** places only — `project.yml`'s
-      top-level `settings.base.MARKETING_VERSION` and `CURRENT_PROJECT_VERSION`,
-      plus `IslandWhisper/Resources/Info.plist`'s `CFBundleShortVersionString`
-      and `CFBundleVersion`. The target's `info.properties` block uses
-      `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)` so it inherits
-      automatically — do **not** hardcode literals there (caused build-number
-      drift in v1.2.4 → would silently ship the wrong build to Sparkle).
+- [ ] Version is bumped in **one** place: `project.yml`'s top-level
+      `settings.base.MARKETING_VERSION` and `CURRENT_PROJECT_VERSION`. Both
+      `IslandWhisper/Resources/Info.plist` and the target's `info.properties`
+      block use `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)` so they
+      inherit automatically — do **not** hardcode literals in either place
+      (a stale literal caused v1.2.4 to ship with build 6 instead of 7,
+      which then put the Sparkle client into an infinite update loop).
 - [ ] `CFBundleVersion` (build number) is monotonically incremented — Sparkle
       keys updates by this value, so a stale build number means existing
       installs won't see the update even when `CFBundleShortVersionString`
-      bumps.
+      bumps. The release workflow reads `CURRENT_PROJECT_VERSION` from
+      `project.yml` (NOT from `Info.plist`, which still contains the literal
+      `$(CURRENT_PROJECT_VERSION)` placeholder until xcodebuild interpolates
+      it) — keep it that way; reading the unprocessed plist gave us
+      `sparkle:version=""` for v1.2.5 and broke the appcast.
 - [ ] If the model catalog changed, the size + URL fields in
       `IslandWhisper/Transcription/ModelManager.swift` reflect reality.
 

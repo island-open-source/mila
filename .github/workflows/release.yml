@@ -32,15 +32,24 @@ jobs:
       - name: Resolve version
         id: version
         run: |
+          set -euo pipefail
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/v}"
           else
             VERSION="${{ github.event.inputs.version }}"
           fi
-          # Sparkle keys appcast entries by CFBundleVersion (the build number),
-          # so we read it directly from the source-of-truth Info.plist rather
-          # than re-deriving from the tag.
-          BUILD=$(/usr/libexec/PlistBuddy -c "Print CFBundleVersion" IslandWhisper/Resources/Info.plist)
+          # Sparkle keys appcast entries by CFBundleVersion (the build number).
+          # We read it from project.yml — the single source of truth — because
+          # the source Info.plist contains the literal placeholder
+          # `$(CURRENT_PROJECT_VERSION)` (it is resolved by xcodebuild at
+          # build-time). Reading the unprocessed Info.plist gave us an empty
+          # build number for v1.2.5, which then made Sparkle ignore the update
+          # because `sparkle:version=""` does not compare as newer than `"6"`.
+          BUILD=$(awk -F'"' '/^[[:space:]]+CURRENT_PROJECT_VERSION:/ {print $2; exit}' project.yml)
+          if [[ -z "$BUILD" ]]; then
+            echo "error: failed to extract CURRENT_PROJECT_VERSION from project.yml" >&2
+            exit 1
+          fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
           echo "build=${BUILD}" >> "$GITHUB_OUTPUT"
