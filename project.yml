@@ -17,8 +17,8 @@ settings:
     SWIFT_STRICT_CONCURRENCY: minimal
     GENERATE_INFOPLIST_FILE: NO
     PRODUCT_BUNDLE_IDENTIFIER: io.island.whisper.IslandWhisper
-    MARKETING_VERSION: "1.2.3"
-    CURRENT_PROJECT_VERSION: "6"
+    MARKETING_VERSION: "1.2.4"
+    CURRENT_PROJECT_VERSION: "7"
 
 packages:
   WhisperBinary:
@@ -44,7 +44,7 @@ targets:
       properties:
         CFBundleName: IslandWhisper
         CFBundleDisplayName: Island Whisper
-        CFBundleShortVersionString: "1.2.3"
+        CFBundleShortVersionString: "1.2.4"
         CFBundleVersion: "6"
         LSMinimumSystemVersion: "14.0"
         LSApplicationCategoryType: public.app-category.productivity
