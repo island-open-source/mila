@@ -1,0 +1,139 @@
+import Foundation
+import Combine
+
+/// Which local LLM CLI Island Whisper will shell out to for naming
+/// recordings and running post-recording actions. We deliberately keep this
+/// to a closed set of two so the Settings UI can show working defaults +
+/// concrete examples — supporting arbitrary CLIs would force the user to
+/// know shell-quoting rules.
+enum LLMTool: String, CaseIterable, Identifiable, Codable {
+    case none
+    case claude
+    case cursor
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .none:   return "Off"
+        case .claude: return "Claude (claude CLI)"
+        case .cursor: return "Cursor (cursor-agent CLI)"
+        }
+    }
+
+    /// Default executable name (looked up via the user's `$PATH`).
+    var executableName: String {
+        switch self {
+        case .none:   return ""
+        case .claude: return "claude"
+        case .cursor: return "cursor-agent"
+        }
+    }
+
+    /// Arguments for a one-shot, non-interactive print. Both `claude -p` and
+    /// `cursor-agent -p` accept a prompt argument and stream the answer to
+    /// stdout, exiting when done.
+    ///
+    /// `cursor-agent` also requires `-f` (force / trust the current working
+    /// directory) in non-interactive mode — without it, the very first
+    /// run bails with "Workspace Trust Required". We always pass it because
+    /// the cwd is whatever launchd handed Island Whisper, the user never
+    /// sees it, and we're only asking the LLM to read a transcript.
+    func arguments(prompt: String) -> [String] {
+        switch self {
+        case .none:   return []
+        case .claude: return ["-p", prompt]
+        case .cursor: return ["-p", "-f", prompt]
+        }
+    }
+}
+
+/// User-configurable prompts + tool selection for the LLM integration. The
+/// "name" prompt is sent right after a recording transcribes so the user can
+/// accept / reject a suggested title; the "action" prompt is what the user
+/// pipes their transcript into for things like "summarize and email this".
+@MainActor
+final class LLMSettings: ObservableObject {
+    @Published var tool: LLMTool {
+        didSet {
+            guard tool != oldValue else { return }
+            defaults.set(tool.rawValue, forKey: Keys.tool)
+        }
+    }
+
+    /// Optional override of the CLI executable path. When empty we rely on
+    /// the system `$PATH` — convenient on dev machines, less so for users
+    /// who installed claude/cursor in a non-shell-default location (e.g.
+    /// `~/.local/bin`).
+    @Published var executablePath: String {
+        didSet {
+            guard executablePath != oldValue else { return }
+            defaults.set(executablePath, forKey: Keys.executablePath)
+        }
+    }
+
+    @Published var nameGenerationEnabled: Bool {
+        didSet { defaults.set(nameGenerationEnabled, forKey: Keys.nameEnabled) }
+    }
+
+    @Published var namePrompt: String {
+        didSet { defaults.set(namePrompt, forKey: Keys.namePrompt) }
+    }
+
+    @Published var postActionEnabled: Bool {
+        didSet { defaults.set(postActionEnabled, forKey: Keys.actionEnabled) }
+    }
+
+    @Published var postActionPrompt: String {
+        didSet { defaults.set(postActionPrompt, forKey: Keys.actionPrompt) }
+    }
+
+    /// Convenience the UI uses to decide whether to surface the rename /
+    /// run-action buttons at all.
+    var isConfigured: Bool { tool != .none }
+
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        let rawTool = defaults.string(forKey: Keys.tool) ?? LLMTool.none.rawValue
+        self.tool = LLMTool(rawValue: rawTool) ?? .none
+        self.executablePath = defaults.string(forKey: Keys.executablePath) ?? ""
+        self.nameGenerationEnabled = defaults.bool(forKey: Keys.nameEnabled)
+        self.namePrompt = defaults.string(forKey: Keys.namePrompt) ?? Self.defaultNamePrompt
+        self.postActionEnabled = defaults.bool(forKey: Keys.actionEnabled)
+        self.postActionPrompt = defaults.string(forKey: Keys.actionPrompt) ?? Self.defaultActionPrompt
+    }
+
+    /// Default name prompt is deliberately *tool-free*. The previous default
+    /// asked claude to read the Mac calendar, which made the CLI hang trying
+    /// to use an MCP it didn't have — the symptom users hit was "Suggest
+    /// never returns". Plain summarisation is the safe baseline; calendar
+    /// lookup is offered as an example for users whose claude/cursor setup
+    /// genuinely has that integration wired up.
+    static let defaultNamePrompt =
+        "Read the transcript below and reply with a 3–6 word title for it. Respond with just the title — no quotes, no punctuation, no preamble."
+    static let defaultActionPrompt =
+        "Summarize the transcript below as bullet points and email the summary to me at uri@island.io."
+
+    /// Example pairs surfaced in the Settings UI as a "you could try…" hint.
+    static let nameExamples: [String] = [
+        "Read the transcript below and reply with a 3–6 word title — no quotes, no punctuation.",
+        "If you have my Mac calendar configured, use the title of the current event; otherwise summarise the transcript in 3–6 words.",
+        "Extract the most-mentioned topic from the transcript and use it as the title (3–6 words)."
+    ]
+    static let actionExamples: [String] = [
+        "Summarize this and email the summary to the meeting attendees.",
+        "Extract action items as a Markdown checklist and append to my daily note.",
+        "Translate this transcript to English and copy to my clipboard."
+    ]
+
+    private enum Keys {
+        static let tool = "llm.tool"
+        static let executablePath = "llm.executablePath"
+        static let nameEnabled = "llm.name.enabled"
+        static let namePrompt = "llm.name.prompt"
+        static let actionEnabled = "llm.action.enabled"
+        static let actionPrompt = "llm.action.prompt"
+    }
+}

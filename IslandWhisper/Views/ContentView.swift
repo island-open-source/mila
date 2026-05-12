@@ -9,6 +9,7 @@ struct ContentView: View {
     @EnvironmentObject private var dictation: DictationController
     @EnvironmentObject private var modelManager: ModelManager
     @EnvironmentObject private var languageSettings: RecordingLanguageSettings
+    @EnvironmentObject private var postRecording: PostRecordingCoordinator
 
     @State private var selection: SidebarSelection? = .home
     @State private var search: String = ""
@@ -73,6 +74,21 @@ struct ContentView: View {
         .sheet(isPresented: $actions.isAppPickerShown) {
             AppPickerSheet()
         }
+        .sheet(item: Binding(
+            get: { postRecording.pending },
+            set: { newValue in if newValue == nil { postRecording.pending = nil } }
+        )) { recording in
+            RenameRecordingSheet(initialRecording: recording)
+        }
+        .overlay(alignment: .bottom) {
+            if let msg = postRecording.activityStatus {
+                LLMActivityBanner(message: msg, isError: postRecording.activityIsError)
+                    .padding(.bottom, 24)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .id(msg)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: postRecording.activityStatus)
     }
 
     private func activeDownloadProgress() -> Double? {
@@ -371,5 +387,33 @@ private struct AppPickerSheet: View {
         }
         .padding(20)
         .frame(width: 460)
+    }
+}
+
+/// Transient toast for background LLM activity ("Sending to Claude…",
+/// "Claude failed: …"). Lives in `ContentView` so it can sit over whatever
+/// the user navigated to while the action was running.
+private struct LLMActivityBanner: View {
+    let message: String
+    let isError: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: isError ? "exclamationmark.triangle.fill" : "sparkles")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(isError ? Color.red : Color.accentColor)
+            Text(message)
+                .font(.callout)
+                .lineLimit(2)
+                .truncationMode(.tail)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
     }
 }

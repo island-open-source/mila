@@ -141,10 +141,14 @@ final class MicrophoneRecorder: ObservableObject {
         continuation: AsyncStream<AVAudioPCMBuffer>.Continuation,
         onLevel: @escaping @Sendable (Float) -> Void
     ) async throws -> EngineBox {
-        try await Task.detached(priority: .userInitiated) { () -> EngineBox in
+        // Read the user's pinned input UID off the main actor — UserDefaults
+        // is thread-safe and Settings writes via a @MainActor object, so the
+        // value we see here is at worst one start() stale.
+        let preferredUID = UserDefaults.standard.string(forKey: "audio.input.preferredUID")
+        return try await Task.detached(priority: .userInitiated) { () -> EngineBox in
             let engine = AVAudioEngine()
             let input = engine.inputNode
-            if let device = AudioDeviceManager.preferredInputDevice() {
+            if let device = AudioDeviceManager.preferredInputDevice(preferredUID: preferredUID) {
                 do {
                     try AudioDeviceManager.setInputDevice(device, on: engine)
                     print("Mic: using \(device.name) [\(device.manufacturer)]")

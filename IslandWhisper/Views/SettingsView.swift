@@ -8,11 +8,78 @@ struct SettingsView: View {
         TabView {
             HotkeysSettingsTab()
                 .tabItem { Label("Hotkeys", systemImage: "command") }
+            AudioSettingsTab()
+                .tabItem { Label("Audio", systemImage: "mic") }
             ModelsSettingsTab()
                 .tabItem { Label("Models", systemImage: "cube.box") }
+            LLMSettingsTab()
+                .tabItem { Label("LLM", systemImage: "sparkles") }
         }
-        .frame(width: 520, height: 420)
+        .frame(width: 560, height: 520)
         .padding(20)
+    }
+}
+
+// MARK: - Audio
+
+private struct AudioSettingsTab: View {
+    @EnvironmentObject private var settings: AudioInputSettings
+    @State private var devices: [AudioDeviceManager.Device] = []
+
+    /// Sentinel UID that means "follow the system default input". Picker's
+    /// SwiftUI tag has to be `String`, so we can't use Optional<String> as a
+    /// tag value directly here without all the rawValue plumbing.
+    private static let autoTag = "__auto__"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Input source")
+                .font(.title3.weight(.semibold))
+            Text("Choose which microphone Island Whisper reads from. Leave on Automatic to follow whatever macOS uses as its system default. Pin to a specific device if your default is a virtual mic (Krisp, BlackHole, Zoom Audio, etc.) and you'd rather record from the raw hardware.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Picker("Input", selection: binding) {
+                Text("Automatic (system default)")
+                    .tag(Self.autoTag)
+                ForEach(devices, id: \.uid) { device in
+                    Text(label(for: device))
+                        .tag(device.uid)
+                }
+                if let pinned = settings.preferredUID,
+                   devices.first(where: { $0.uid == pinned }) == nil {
+                    Text("Saved device (unplugged) — \(pinned)")
+                        .tag(pinned)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(maxWidth: 360)
+
+            Button("Refresh device list") { refresh() }
+                .buttonStyle(.borderless)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear(perform: refresh)
+    }
+
+    private var binding: Binding<String> {
+        Binding(
+            get: { settings.preferredUID ?? Self.autoTag },
+            set: { settings.preferredUID = ($0 == Self.autoTag) ? nil : $0 }
+        )
+    }
+
+    private func label(for device: AudioDeviceManager.Device) -> String {
+        var parts: [String] = [device.name]
+        if device.isBuiltIn { parts.append("built-in") }
+        if device.isVirtual { parts.append("virtual") }
+        return parts.joined(separator: " — ")
+    }
+
+    private func refresh() {
+        devices = AudioDeviceManager.inputDevices()
     }
 }
 
@@ -285,5 +352,124 @@ private struct ModelRow: View {
         f.countStyle = .binary
         f.allowedUnits = [.useGB, .useMB]
         return f.string(fromByteCount: bytes)
+    }
+}
+
+// MARK: - LLM
+
+private struct LLMSettingsTab: View {
+    @EnvironmentObject private var settings: LLMSettings
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                header
+                toolPicker
+                Divider()
+                namePromptSection
+                Divider()
+                actionPromptSection
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("LLM integration")
+                .font(.title3.weight(.semibold))
+            Text("After a recording finishes transcribing, Island Whisper can shell out to a local LLM CLI (Claude or Cursor) to suggest a name and/or run a custom action with the transcript. Both CLIs run on your machine with whatever auth you already configured for them; we only forward the transcript text — nothing else.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var toolPicker: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("Tool", selection: $settings.tool) {
+                ForEach(LLMTool.allCases) { tool in
+                    Text(tool.displayName).tag(tool)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            HStack {
+                Text("Executable path").frame(width: 130, alignment: .leading)
+                TextField("(use $PATH)", text: $settings.executablePath)
+                    .textFieldStyle(.roundedBorder)
+            }
+            .font(.callout)
+            Text("Leave blank to look up the binary on $PATH. Set this if `claude` / `cursor-agent` lives somewhere a GUI app won't see by default (e.g. ~/.local/bin, an asdf shim).")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var namePromptSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Suggest a name from the LLM", isOn: $settings.nameGenerationEnabled)
+                .toggleStyle(.switch)
+            Text("Prompt sent alongside the transcript when you click Suggest in the rename sheet:")
+                .font(.callout).foregroundStyle(.secondary)
+            TextEditor(text: $settings.namePrompt)
+                .font(.system(.callout, design: .monospaced))
+                .frame(minHeight: 70, maxHeight: 110)
+                .overlay(RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color.primary.opacity(0.15), lineWidth: 1))
+                .disabled(!settings.nameGenerationEnabled)
+            ExamplesView(title: "Examples", items: LLMSettings.nameExamples) {
+                settings.namePrompt = $0
+            }
+        }
+    }
+
+    private var actionPromptSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Run an action with the transcript", isOn: $settings.postActionEnabled)
+                .toggleStyle(.switch)
+            Text("Prompt the rename sheet's Run-action button sends together with the transcript:")
+                .font(.callout).foregroundStyle(.secondary)
+            TextEditor(text: $settings.postActionPrompt)
+                .font(.system(.callout, design: .monospaced))
+                .frame(minHeight: 70, maxHeight: 110)
+                .overlay(RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color.primary.opacity(0.15), lineWidth: 1))
+                .disabled(!settings.postActionEnabled)
+            ExamplesView(title: "Examples", items: LLMSettings.actionExamples) {
+                settings.postActionPrompt = $0
+            }
+        }
+    }
+}
+
+/// Compact "click an example to fill the prompt field above" helper.
+private struct ExamplesView: View {
+    let title: String
+    let items: [String]
+    let onPick: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            ForEach(items, id: \.self) { item in
+                Button {
+                    onPick(item)
+                } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: "arrow.up.left")
+                            .font(.caption)
+                            .foregroundStyle(.tint)
+                        Text(item)
+                            .font(.callout)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
+            }
+        }
     }
 }

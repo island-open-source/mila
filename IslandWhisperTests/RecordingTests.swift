@@ -35,7 +35,37 @@ final class RecordingTests: XCTestCase {
         XCTAssertEqual(decoded.language, "he")
         XCTAssertEqual(decoded.segments.count, 2)
         XCTAssertEqual(decoded.segments[0].text, "שלום וברוכים הבאים")
-        XCTAssertEqual(decoded.fullText, "שלום וברוכים הבאים לפגישה שלנו")
+        // fullText is no longer encoded into recordings.json — it lives in a
+        // sidecar `.txt` file persisted by RecordingStore. The encoder must
+        // drop it; the decoder leaves it empty so the store can re-hydrate.
+        XCTAssertEqual(decoded.fullText, "")
+        let asString = String(data: data, encoding: .utf8) ?? ""
+        XCTAssertFalse(asString.contains("\"fullText\""),
+                       "fullText key must not appear in the JSON-encoded blob")
+    }
+
+    func test_legacy_records_with_inline_fullText_still_decode() throws {
+        // Records persisted under the pre-sidecar schema had `fullText`
+        // inside the JSON. We have to keep decoding them so the first
+        // launch after upgrade can migrate them to a sidecar.
+        let legacy = """
+        {
+          "id": "11111111-2222-3333-4444-555555555555",
+          "title": "Legacy",
+          "createdAt": "2025-01-01T00:00:00Z",
+          "duration": 1.0,
+          "source": "microphone",
+          "audioFileName": "Legacy.wav",
+          "status": "completed",
+          "language": "en",
+          "segments": [],
+          "fullText": "old inline text"
+        }
+        """.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(Recording.self, from: legacy)
+        XCTAssertEqual(decoded.fullText, "old inline text")
     }
 
     func test_recording_source_display_names_are_all_set() {

@@ -17,8 +17,8 @@ settings:
     SWIFT_STRICT_CONCURRENCY: minimal
     GENERATE_INFOPLIST_FILE: NO
     PRODUCT_BUNDLE_IDENTIFIER: io.island.whisper.IslandWhisper
-    MARKETING_VERSION: "1.2.6"
-    CURRENT_PROJECT_VERSION: "9"
+    MARKETING_VERSION: "1.2.7"
+    CURRENT_PROJECT_VERSION: "10"
 
 packages:
   WhisperBinary:

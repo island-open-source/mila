@@ -28,15 +28,18 @@ final class QuickActionsController: ObservableObject {
     let store: RecordingStore
     let transcription: TranscriptionService
     let languageSettings: RecordingLanguageSettings
+    let postRecording: PostRecordingCoordinator
 
     init(session: RecordingSession,
          store: RecordingStore,
          transcription: TranscriptionService,
-         languageSettings: RecordingLanguageSettings) {
+         languageSettings: RecordingLanguageSettings,
+         postRecording: PostRecordingCoordinator) {
         self.session = session
         self.store = store
         self.transcription = transcription
         self.languageSettings = languageSettings
+        self.postRecording = postRecording
     }
 
     // MARK: - Voice memo (mic only)
@@ -127,6 +130,12 @@ final class QuickActionsController: ObservableObject {
         )
         store.add(recording)
         activeJob = .none
+        // Open the rename sheet immediately, in parallel with transcription.
+        // The sheet watches the store for the transcript to land and
+        // enables LLM-suggest / Send-to-Claude once it's ready. Dictations
+        // and imported files deliberately skip this — naming a 3-second
+        // dictation would be more friction than the auto-title is worth.
+        postRecording.present(recording)
         transcription.enqueue(recording)
     }
 

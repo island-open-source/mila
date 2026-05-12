@@ -50,6 +50,9 @@ struct Recording: Identifiable, Codable, Hashable {
     var language: String
     var modelName: String?
     var segments: [TranscriptSegment]
+    /// Plain-text transcript. Persisted to a sidecar `.txt` file on disk
+    /// (RecordingStore handles I/O); NOT encoded into recordings.json so the
+    /// metadata blob stays small as the user accumulates recordings.
     var fullText: String
     /// When non-nil the recording is in the "Recently Deleted" trash.
     var deletedAt: Date?
@@ -81,6 +84,55 @@ struct Recording: Identifiable, Codable, Hashable {
     }
 
     var isTrashed: Bool { deletedAt != nil }
+
+    /// File name (relative to recordings directory) of the sidecar `.txt`
+    /// holding the plain-text transcript. Derived from `audioFileName` so a
+    /// recording + its transcript stay side by side and survive a rename.
+    var transcriptFileName: String {
+        (audioFileName as NSString).deletingPathExtension + ".txt"
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, createdAt, duration, source, audioFileName,
+             status, language, modelName, segments, deletedAt
+        // `fullText` deliberately excluded — lives in a sidecar .txt file.
+        // Legacy records that had it inline are decoded via the custom init.
+        case fullText
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(UUID.self, forKey: .id)
+        self.title = try c.decode(String.self, forKey: .title)
+        self.createdAt = try c.decode(Date.self, forKey: .createdAt)
+        self.duration = try c.decode(Double.self, forKey: .duration)
+        self.source = try c.decode(RecordingSource.self, forKey: .source)
+        self.audioFileName = try c.decode(String.self, forKey: .audioFileName)
+        self.status = try c.decode(TranscriptionStatus.self, forKey: .status)
+        self.language = try c.decode(String.self, forKey: .language)
+        self.modelName = try c.decodeIfPresent(String.self, forKey: .modelName)
+        self.segments = try c.decodeIfPresent([TranscriptSegment].self, forKey: .segments) ?? []
+        self.deletedAt = try c.decodeIfPresent(Date.self, forKey: .deletedAt)
+        // Legacy records still have fullText inline; new records leave it
+        // empty here and RecordingStore loads it from the sidecar .txt.
+        self.fullText = try c.decodeIfPresent(String.self, forKey: .fullText) ?? ""
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(title, forKey: .title)
+        try c.encode(createdAt, forKey: .createdAt)
+        try c.encode(duration, forKey: .duration)
+        try c.encode(source, forKey: .source)
+        try c.encode(audioFileName, forKey: .audioFileName)
+        try c.encode(status, forKey: .status)
+        try c.encode(language, forKey: .language)
+        try c.encodeIfPresent(modelName, forKey: .modelName)
+        try c.encode(segments, forKey: .segments)
+        try c.encodeIfPresent(deletedAt, forKey: .deletedAt)
+        // fullText intentionally omitted — sidecar .txt is the source of truth.
+    }
 }
 
 /// Categories used by the sidebar. Matches the History grouping.

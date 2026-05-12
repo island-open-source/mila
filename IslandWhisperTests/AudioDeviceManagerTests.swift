@@ -45,6 +45,7 @@ final class AudioDeviceManagerTests: XCTestCase {
         let devices = AudioDeviceManager.inputDevices()
         guard let first = devices.first else { return }
         let copy = AudioDeviceManager.Device(id: first.id,
+                                             uid: first.uid,
                                              name: first.name,
                                              manufacturer: first.manufacturer,
                                              isBuiltIn: first.isBuiltIn,

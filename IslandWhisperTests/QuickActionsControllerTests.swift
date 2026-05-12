@@ -43,7 +43,10 @@ final class QuickActionsControllerTests: XCTestCase {
         controller = QuickActionsController(session: session,
                                             store: store,
                                             transcription: service,
-                                            languageSettings: languageSettings)
+                                            languageSettings: languageSettings,
+                                            postRecording: PostRecordingCoordinator(
+                                                store: store,
+                                                transcription: service))
     }
 
     override func tearDown() async throws {

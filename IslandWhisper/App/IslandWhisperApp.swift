@@ -41,6 +41,9 @@ struct IslandWhisperApp: App {
     @StateObject private var session: RecordingSession
     @StateObject private var hotkeySettings: HotkeySettings
     @StateObject private var languageSettings: RecordingLanguageSettings
+    @StateObject private var audioInputSettings: AudioInputSettings
+    @StateObject private var llmSettings: LLMSettings
+    @StateObject private var postRecording: PostRecordingCoordinator
     @StateObject private var updater = UpdaterViewModel()
 
     init() {
@@ -49,10 +52,14 @@ struct IslandWhisperApp: App {
         let svc = TranscriptionService(store: store, modelManager: mgr)
         let session = RecordingSession()
         let langSettings = RecordingLanguageSettings()
+        let audioSettings = AudioInputSettings()
+        let llm = LLMSettings()
+        let coordinator = PostRecordingCoordinator(store: store, transcription: svc)
         let actions = QuickActionsController(session: session,
                                              store: store,
                                              transcription: svc,
-                                             languageSettings: langSettings)
+                                             languageSettings: langSettings,
+                                             postRecording: coordinator)
         let hotkeys = HotkeySettings()
         _store = StateObject(wrappedValue: store)
         _modelManager = StateObject(wrappedValue: mgr)
@@ -61,6 +68,9 @@ struct IslandWhisperApp: App {
         _actions = StateObject(wrappedValue: actions)
         _hotkeySettings = StateObject(wrappedValue: hotkeys)
         _languageSettings = StateObject(wrappedValue: langSettings)
+        _audioInputSettings = StateObject(wrappedValue: audioSettings)
+        _llmSettings = StateObject(wrappedValue: llm)
+        _postRecording = StateObject(wrappedValue: coordinator)
         _dictation = StateObject(wrappedValue: DictationController(store: store,
                                                                     transcription: svc,
                                                                     hotkeySettings: hotkeys))
@@ -77,6 +87,9 @@ struct IslandWhisperApp: App {
                 .environmentObject(session)
                 .environmentObject(hotkeySettings)
                 .environmentObject(languageSettings)
+                .environmentObject(audioInputSettings)
+                .environmentObject(llmSettings)
+                .environmentObject(postRecording)
                 .frame(minWidth: 1000, minHeight: 640)
                 .task { ensureDefaultModelsInstalled() }
                 .onAppear { wireDelegate() }
@@ -113,6 +126,8 @@ struct IslandWhisperApp: App {
                 .environmentObject(modelManager)
                 .environmentObject(hotkeySettings)
                 .environmentObject(transcription)
+                .environmentObject(audioInputSettings)
+                .environmentObject(llmSettings)
         }
     }
 

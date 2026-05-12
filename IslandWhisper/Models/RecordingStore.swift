@@ -49,6 +49,13 @@ final class RecordingStore: ObservableObject {
         recordingsDirectory.appendingPathComponent(recording.audioFileName)
     }
 
+    /// Path of the per-recording `.txt` transcript sidecar. The file may not
+    /// exist yet (recording still pending) — callers should treat absence as
+    /// empty text.
+    func transcriptURL(for recording: Recording) -> URL {
+        recordingsDirectory.appendingPathComponent(recording.transcriptFileName)
+    }
+
     func freshAudioURL(suggestedName: String? = nil) -> URL {
         let stamp = ISO8601DateFormatter().string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
@@ -60,13 +67,34 @@ final class RecordingStore: ObservableObject {
 
     func add(_ recording: Recording) {
         recordings.insert(recording, at: 0)
+        writeTranscript(for: recording)
         persist()
     }
 
     func update(_ recording: Recording) {
         guard let idx = recordings.firstIndex(where: { $0.id == recording.id }) else { return }
         recordings[idx] = recording
+        writeTranscript(for: recording)
         persist()
+    }
+
+    /// Persist (or clear) the `.txt` sidecar for a recording. Empty text
+    /// removes the file so we never leave a stale transcript around after a
+    /// re-transcription that came up silent.
+    private func writeTranscript(for recording: Recording) {
+        let url = transcriptURL(for: recording)
+        let text = recording.fullText
+        do {
+            if text.isEmpty {
+                if fileManager.fileExists(atPath: url.path) {
+                    try fileManager.removeItem(at: url)
+                }
+            } else {
+                try text.write(to: url, atomically: true, encoding: .utf8)
+            }
+        } catch {
+            print("RecordingStore: failed to write transcript \(url.lastPathComponent): \(error)")
+        }
     }
 
     /// Move to "Recently Deleted". The audio file stays on disk until permanent delete.
@@ -86,8 +114,8 @@ final class RecordingStore: ObservableObject {
     /// Remove the metadata + audio file from disk.
     func permanentlyDelete(_ recording: Recording) {
         recordings.removeAll { $0.id == recording.id }
-        let url = audioURL(for: recording)
-        try? fileManager.removeItem(at: url)
+        try? fileManager.removeItem(at: audioURL(for: recording))
+        try? fileManager.removeItem(at: transcriptURL(for: recording))
         persist()
     }
 
@@ -118,8 +146,34 @@ final class RecordingStore: ObservableObject {
         guard let data = try? Data(contentsOf: storeURL) else { return }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        if let decoded = try? decoder.decode([Recording].self, from: data) {
-            self.recordings = decoded.sorted { $0.createdAt > $1.createdAt }
+        guard var decoded = try? decoder.decode([Recording].self, from: data) else { return }
+
+        // Hydrate fullText from the sidecar `.txt`. For records persisted
+        // under the old "fullText inline" schema, the legacy decoder filled
+        // it in already — we migrate those to a sidecar on first sight so
+        // future writes are consistent.
+        var needsMigration = false
+        for i in decoded.indices {
+            let url = transcriptURL(for: decoded[i])
+            if let text = try? String(contentsOf: url, encoding: .utf8) {
+                decoded[i].fullText = text
+            } else if !decoded[i].fullText.isEmpty {
+                // Legacy record with inline text — keep what we decoded and
+                // flush a sidecar so subsequent loads pick it up from disk.
+                writeTranscript(for: decoded[i])
+                needsMigration = true
+            } else if !decoded[i].segments.isEmpty {
+                // Fallback: reconstruct from segments (shouldn't normally
+                // happen — segments + empty fullText only existed on the
+                // brief window where status was running and we hadn't
+                // flushed the final text yet).
+                let joined = decoded[i].segments.map(\.text).joined()
+                decoded[i].fullText = joined
+            }
+        }
+        self.recordings = decoded.sorted { $0.createdAt > $1.createdAt }
+        if needsMigration {
+            persist()  // re-write JSON without inline fullText
         }
     }
 

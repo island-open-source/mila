@@ -10,6 +10,10 @@ enum AudioDeviceManager {
 
     struct Device: Identifiable, Hashable {
         let id: AudioDeviceID
+        /// Stable identifier (kAudioDevicePropertyDeviceUID). AudioDeviceID is
+        /// reassigned on every plug/unplug, so it's unsafe to persist; the UID
+        /// is what we save when the user pins an input in Settings.
+        let uid: String
         let name: String
         let manufacturer: String
         let isBuiltIn: Bool
@@ -23,6 +27,7 @@ enum AudioDeviceManager {
             guard let info = info(for: deviceID), info.inputChannels > 0 else { continue }
             devices.append(Device(
                 id: deviceID,
+                uid: info.uid,
                 name: info.name,
                 manufacturer: info.manufacturer,
                 isBuiltIn: info.isBuiltIn,
@@ -32,13 +37,24 @@ enum AudioDeviceManager {
         return devices
     }
 
+    /// Look up a device by its stable UID (kAudioDevicePropertyDeviceUID).
+    /// Returns nil if no current input matches — the device may have been
+    /// unplugged since the user last picked it in Settings.
+    static func device(uid: String) -> Device? {
+        inputDevices().first(where: { $0.uid == uid })
+    }
+
     /// Best guess for the user's actual microphone:
+    /// 0. If `preferredUID` is given and matches a connected input, use it.
     /// 1. The current system default input — but only if it's not a virtual device.
     /// 2. Otherwise, the built-in MacBook microphone if present.
     /// 3. Otherwise, the first non-virtual physical input device.
     /// Returns `nil` to mean "fall back to AVAudioEngine's default behavior".
-    static func preferredInputDevice() -> Device? {
+    static func preferredInputDevice(preferredUID: String? = nil) -> Device? {
         let inputs = inputDevices()
+        if let preferredUID, let pinned = inputs.first(where: { $0.uid == preferredUID }) {
+            return pinned
+        }
         let defaultID = systemDefaultInputDeviceID()
         if let def = inputs.first(where: { $0.id == defaultID }), !def.isVirtual {
             return def
@@ -101,6 +117,7 @@ enum AudioDeviceManager {
     }
 
     private struct DeviceInfo {
+        let uid: String
         let name: String
         let manufacturer: String
         let inputChannels: Int
@@ -109,6 +126,7 @@ enum AudioDeviceManager {
     }
 
     private static func info(for deviceID: AudioDeviceID) -> DeviceInfo? {
+        let uid = stringProperty(deviceID, kAudioDevicePropertyDeviceUID) ?? ""
         let name = stringProperty(deviceID, kAudioDevicePropertyDeviceNameCFString) ?? ""
         let manufacturer = stringProperty(deviceID, kAudioDevicePropertyDeviceManufacturerCFString) ?? ""
         let transport = uint32Property(deviceID, kAudioDevicePropertyTransportType) ?? 0
@@ -117,7 +135,8 @@ enum AudioDeviceManager {
         let isVirtual = (transport == kAudioDeviceTransportTypeVirtual
                          || transport == kAudioDeviceTransportTypeAggregate
                          || isKnownVirtualVendor(name: name, manufacturer: manufacturer))
-        return DeviceInfo(name: name,
+        return DeviceInfo(uid: uid,
+                          name: name,
                           manufacturer: manufacturer,
                           inputChannels: inputChannels,
                           isBuiltIn: isBuiltIn,
