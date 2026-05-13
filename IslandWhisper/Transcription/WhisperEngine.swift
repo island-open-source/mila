@@ -62,7 +62,8 @@ actor WhisperEngine {
     /// `progress` is invoked with values in `0...1` from inside the C callback.
     func transcribe(samples rawSamples: [Float],
                     language: String,
-                    progress: (@Sendable (Float) -> Void)?) throws -> [TranscriptSegment] {
+                    progress: (@Sendable (Float) -> Void)?,
+                    isCancelled: (@Sendable () -> Bool)?) throws -> [TranscriptSegment] {
         guard let ctx else {
             throw Error.modelLoadFailed("(no model loaded)")
         }
@@ -93,7 +94,7 @@ actor WhisperEngine {
         params.suppress_blank = true
         params.no_speech_thold = 0.3
 
-        let userBox = CallbackBox(progress: progress)
+        let userBox = CallbackBox(progress: progress, isCancelled: isCancelled)
         let userPtr = Unmanaged.passRetained(userBox).toOpaque()
         defer { Unmanaged<CallbackBox>.fromOpaque(userPtr).release() }
 
@@ -104,6 +105,17 @@ actor WhisperEngine {
         }
         params.progress_callback_user_data = userPtr
 
+        // Wire ggml's abort_callback to our cancellation flag. ggml polls this
+        // between every compute step, so when the user hits Cancel mid-run
+        // whisper_full unwinds within ~100ms instead of running to completion
+        // and burning CPU on a transcript we're about to throw away.
+        params.abort_callback = { userData in
+            guard let userData else { return false }
+            let box = Unmanaged<CallbackBox>.fromOpaque(userData).takeUnretainedValue()
+            return box.isCancelled?() ?? false
+        }
+        params.abort_callback_user_data = userPtr
+
         let langCString = strdup(language)
         defer { free(langCString) }
         params.language = UnsafePointer(langCString)
@@ -111,6 +123,12 @@ actor WhisperEngine {
 
         let result: Int32 = samples.withUnsafeBufferPointer { ptr in
             whisper_full(ctx, params, ptr.baseAddress, Int32(ptr.count))
+        }
+        // The user cancelled mid-run. whisper_full returns non-zero when the
+        // abort_callback fires — swallow that as cancellation, not as a
+        // surprise engine failure the UI should surface to the user.
+        if isCancelled?() == true {
+            throw CancellationError()
         }
         if result != 0 {
             throw Error.transcribeFailed(result)
@@ -192,5 +210,10 @@ extension WhisperEngine {
 /// Boxed callback closure for the C bridging layer.
 private final class CallbackBox: @unchecked Sendable {
     let progress: (@Sendable (Float) -> Void)?
-    init(progress: (@Sendable (Float) -> Void)?) { self.progress = progress }
+    let isCancelled: (@Sendable () -> Bool)?
+    init(progress: (@Sendable (Float) -> Void)?,
+         isCancelled: (@Sendable () -> Bool)?) {
+        self.progress = progress
+        self.isCancelled = isCancelled
+    }
 }

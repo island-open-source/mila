@@ -38,7 +38,8 @@ actor StubWhisperEngine: TranscribingEngine {
 
     func transcribe(samples: [Float],
                     language: String,
-                    progress: (@Sendable (Float) -> Void)?) async throws -> [TranscriptSegment] {
+                    progress: (@Sendable (Float) -> Void)?,
+                    isCancelled: (@Sendable () -> Bool)?) async throws -> [TranscriptSegment] {
         if let err = nextError {
             nextError = nil
             throw err
@@ -55,9 +56,13 @@ actor StubWhisperEngine: TranscribingEngine {
             let steps = 4
             for i in 1...steps {
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000 / Double(steps)))
+                // Mirror the real engine: bail out cleanly if the caller has
+                // flipped the cancellation flag while we were sleeping.
+                if isCancelled?() == true { throw CancellationError() }
                 progress?(Float(i) / Float(steps))
             }
         } else {
+            if isCancelled?() == true { throw CancellationError() }
             progress?(1.0)
         }
 

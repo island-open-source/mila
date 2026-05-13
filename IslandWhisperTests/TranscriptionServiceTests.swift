@@ -349,6 +349,69 @@ final class TranscriptionServiceTests: XCTestCase {
         XCTAssertEqual(text, "")
     }
 
+    // MARK: - Cancellation
+
+    /// Cancelling a recording while it's still pending in the queue should
+    /// short-circuit `process()` so whisper is never called. This is the
+    /// path users hit most often — they cancel before the model even loads.
+    func test_cancel_before_active_skips_whisper_entirely() async throws {
+        let blocker = try TestRecordingFixture.make(in: store, title: "Blocker")
+        let target = try TestRecordingFixture.make(in: store, title: "Target")
+
+        // Make the first job slow so the second sits in the queue while we
+        // cancel it.
+        await stub.setDefaultDelay(0.4)
+
+        service.enqueue(blocker.recording)
+        service.enqueue(target.recording)
+
+        // Wait for the worker to actually pop the blocker as the active job
+        // before we cancel — that's the realistic scenario for users (one
+        // recording is being transcribed, a new one is queued behind it).
+        let activeDeadline = Date().addingTimeInterval(2)
+        while service.activeRecordingID != blocker.recording.id && Date() < activeDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(service.pendingIDs, [target.recording.id])
+
+        service.cancel(recordingID: target.recording.id)
+        XCTAssertTrue(service.pendingIDs.isEmpty,
+                      "Cancel must drop the recording from pendingIDs immediately")
+
+        await service.waitForIdle()
+
+        let calls = await stub.transcribeCalls
+        XCTAssertEqual(calls.count, 1, "Only the blocker should have hit whisper")
+    }
+
+    /// Cancelling while the recording is the active job should trip the
+    /// abort_callback the stub polls. The stub throws `CancellationError`
+    /// when it sees the flag flip, exactly mirroring whisper.cpp's behaviour
+    /// when `abort_callback` returns true mid-`whisper_full`.
+    func test_cancel_during_active_aborts_via_callback() async throws {
+        let target = try TestRecordingFixture.make(in: store, title: "Mid-run")
+        await stub.setDefaultDelay(0.4)
+
+        service.enqueue(target.recording)
+
+        // Wait for the worker to actually pick the job up.
+        let deadline = Date().addingTimeInterval(2)
+        while service.activeRecordingID != target.recording.id && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(service.activeRecordingID, target.recording.id)
+
+        service.cancel(recordingID: target.recording.id)
+        await service.waitForIdle()
+
+        // The recording must NOT be marked as `.failed` — that's a user-
+        // initiated cancel, not an engine error. The coordinator will be
+        // along to delete it shortly.
+        let stored = try XCTUnwrap(store.recordings.first { $0.id == target.recording.id })
+        XCTAssertNotEqual(stored.status, .failed,
+                          "User-cancelled recordings must not surface as engine failures")
+    }
+
     // MARK: - Re-transcribe with the other language
 
     /// Drives the right-click "Re-transcribe in [other language]" path: the

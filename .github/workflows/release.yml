@@ -25,6 +25,25 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 45
     steps:
+      # Gate the entire workflow to the two release captains. Tags are
+      # protected at the org-ruleset level (only admins can push them), so
+      # this is a belt-and-braces check: if anyone else somehow gets a tag
+      # push or workflow_dispatch through, the job exits before it touches
+      # signing keys, AWS creds, or the appcast.
+      - name: Authorize release actor
+        env:
+          ACTOR: ${{ github.actor }}
+        run: |
+          case "$ACTOR" in
+            urisland|yoavyanuka)
+              echo "Release authorized for $ACTOR"
+              ;;
+            *)
+              echo "::error::User '$ACTOR' is not authorized to cut a release. Only urisland and yoavyanuka can." >&2
+              exit 1
+              ;;
+          esac
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -204,6 +223,16 @@ jobs:
           # appcast it just downloaded.
           aws s3 cp "$DMG" "s3://${BUCKET}/${DMG}" \
             --content-type application/octet-stream
+          # Also publish under a stable "latest" name so people can link to
+          # https://island-whisper-updates.internal.island.io/IslandWhisper-latest.dmg
+          # and always get the newest build without infra changes (no
+          # CloudFront redirect, no S3 website routing). Server-side copy
+          # so we don't pay to upload twice.
+          aws s3 cp "s3://${BUCKET}/${DMG}" "s3://${BUCKET}/IslandWhisper-latest.dmg" \
+            --content-type application/octet-stream \
+            --cache-control "max-age=300, must-revalidate" \
+            --metadata "source-version=${{ steps.version.outputs.version }}" \
+            --metadata-directive REPLACE
           aws s3 cp appcast.xml "s3://${BUCKET}/appcast.xml" \
             --content-type "application/xml; charset=utf-8" \
             --cache-control "max-age=300"

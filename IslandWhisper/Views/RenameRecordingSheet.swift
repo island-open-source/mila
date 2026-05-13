@@ -63,7 +63,7 @@ struct RenameRecordingSheet: View {
                         .onSubmit { save() }
                     if llm.isConfigured && llm.nameGenerationEnabled {
                         Button {
-                            Task { await fetchNameFromLLM() }
+                            startFetchName(auto: false)
                         } label: {
                             if isFetchingName {
                                 ProgressView().controlSize(.small)
@@ -90,7 +90,11 @@ struct RenameRecordingSheet: View {
 
             HStack {
                 Spacer()
-                Button("Cancel") { coordinator.dismiss() }
+                // Cancel = throw the recording away entirely (and any
+                // in-flight LLM call + active whisper transcription). See
+                // PostRecordingCoordinator.cancelAndDiscard for the full
+                // teardown.
+                Button("Cancel") { coordinator.cancelAndDiscard() }
                     .keyboardShortcut(.cancelAction)
                 if llm.isConfigured && llm.postActionEnabled {
                     Button("Save") { save() }
@@ -124,7 +128,21 @@ struct RenameRecordingSheet: View {
               transcriptReady,
               !didAutoSuggest,
               !isFetchingName else { return }
-        Task { await fetchNameFromLLM(auto: true) }
+        startFetchName(auto: true)
+    }
+
+    /// Wrap `fetchNameFromLLM` in a Task tracked by the coordinator so the
+    /// rename-sheet's Cancel button can kill it (the auto-suggest path is
+    /// where users were most surprised that "things keep running" after
+    /// Cancel). Auto-clears its own handle on completion so we don't keep
+    /// dead Task references around.
+    private func startFetchName(auto: Bool) {
+        let recordingID = liveRecording.id
+        let task = Task { @MainActor in
+            await fetchNameFromLLM(auto: auto)
+            coordinator.clearLLM(for: recordingID)
+        }
+        coordinator.trackLLM(task, for: recordingID)
     }
 
     private var header: some View {
@@ -241,7 +259,13 @@ struct RenameRecordingSheet: View {
             let firstLine = cleaned.split(whereSeparator: \.isNewline)
                 .first.map(String.init) ?? cleaned
             title = firstLine.trimmingCharacters(in: CharacterSet(charactersIn: "\"'`. "))
+        } catch LLMRunnerError.cancelled {
+            // User clicked Cancel — the sheet is about to be torn down. No
+            // banner, no error state.
         } catch {
+            // Same idea as above for Swift's CancellationError, which surfaces
+            // when withTaskCancellationHandler's onCancel beat us to it.
+            if Task.isCancelled { return }
             llmError = error.localizedDescription
         }
     }

@@ -31,6 +31,13 @@ final class TranscriptionService: ObservableObject {
     private var queue: [Recording] = []
     private var worker: Task<Void, Never>?
 
+    /// Recordings the user asked to abandon mid-run. Held in a thread-safe
+    /// box because whisper.cpp's `abort_callback` polls this from a
+    /// background compute thread, while writes (`cancel(_:)`) come from
+    /// `@MainActor`. Without the lock, the cross-actor read would be a
+    /// data race under strict concurrency.
+    private let cancellation = CancellationFlag()
+
     init(store: RecordingStore,
          modelManager: ModelManager,
          diarizationSettings: DiarizationSettings,
@@ -88,7 +95,8 @@ final class TranscriptionService: ObservableObject {
                                           displayName: model.displayName)
             let segs = try await engine.transcribe(samples: samples,
                                                    language: language,
-                                                   progress: nil)
+                                                   progress: nil,
+                                                   isCancelled: nil)
             return segs.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             print("Dictation transcription error: \(error)")
@@ -101,6 +109,21 @@ final class TranscriptionService: ObservableObject {
     /// global destructors run (which is what triggered SIGABRT on quit).
     func shutdown() async {
         await engine.shutdown()
+    }
+
+    /// Abandon the transcription of `recordingID`. If it's still in the queue
+    /// it's dropped; if it's the active job, the engine's abort_callback
+    /// trips on the next poll and `whisper_full` unwinds in ~100ms instead
+    /// of running to the end. Idempotent — repeated calls are a no-op.
+    ///
+    /// We do NOT delete the recording from the store here. The caller (the
+    /// rename-sheet's Cancel button) is the one that decides whether to
+    /// discard the audio or keep it — keeping that policy out of the service
+    /// means the service stays composable for other potential cancel paths.
+    func cancel(recordingID: UUID) {
+        cancellation.insert(recordingID)
+        queue.removeAll { $0.id == recordingID }
+        publishPending()
     }
 
     // MARK: - Worker
@@ -131,6 +154,14 @@ final class TranscriptionService: ObservableObject {
     }
 
     private func process(_ recording: Recording) async {
+        // The user may have hit Cancel between enqueue and now. Don't spin up
+        // the model just to throw the result away.
+        if cancellation.contains(recording.id) {
+            print("Transcribe skipped: \(recording.title) was cancelled before processing")
+            cancellation.remove(recording.id)
+            return
+        }
+
         guard let model = modelManager.model(for: recording.language) else {
             lastError = "No model selected."
             markFailed(recording)
@@ -232,10 +263,26 @@ final class TranscriptionService: ObservableObject {
                         guard self.activeRecordingID == recordingID else { return }
                         self.progress = Double(p)
                     }
+                },
+                // Polled by whisper.cpp's abort_callback between every
+                // compute step. Reads against the lock-protected flag set so
+                // the cross-thread access is sound.
+                isCancelled: { [cancellation] in
+                    cancellation.contains(recordingID)
                 }
             )
 
             let (speakerTurns, segments) = try await (diarizeTask, transcribeTask)
+
+            // Cover the narrow window where transcription completed BEFORE the
+            // user hit Cancel (so the abort_callback never tripped) but the
+            // coordinator is about to delete the recording. Don't write a
+            // `.completed` row to a recording that's already gone.
+            if cancellation.contains(recordingID) {
+                print("Transcribe cancelled post-run: \(working.title)")
+                cancellation.remove(recordingID)
+                return
+            }
 
             var enrichedSegments = segments
             if !speakerTurns.isEmpty {
@@ -264,6 +311,13 @@ final class TranscriptionService: ObservableObject {
             if working.status == .completed {
                 TranscriptExporter.writeSRT(for: working, in: store.recordingsDirectory)
             }
+        } catch is CancellationError {
+            // The user hit Cancel mid-run. The rename sheet's coordinator is
+            // also going to hard-delete the recording from the store — don't
+            // race with that by writing a `.failed` status, and don't surface
+            // a scary error banner for what was a user-initiated action.
+            print("Transcribe cancelled mid-run: \(working.title)")
+            cancellation.remove(recording.id)
         } catch {
             print("Transcribe error for \(working.title): \(error)")
             working.status = .failed
@@ -277,5 +331,31 @@ final class TranscriptionService: ObservableObject {
             working.status = .failed
             store.update(working)
         }
+    }
+}
+
+/// Thread-safe Set<UUID> for cancelled recording IDs.
+///
+/// Writes happen on `@MainActor` (`TranscriptionService.cancel(_:)`); reads
+/// happen synchronously on whisper.cpp's compute thread (the `abort_callback`
+/// it polls every step). The lock is the simplest shape that lets both sides
+/// share state without strict-concurrency violations.
+final class CancellationFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var ids: Set<UUID> = []
+
+    func insert(_ id: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        ids.insert(id)
+    }
+
+    func remove(_ id: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        ids.remove(id)
+    }
+
+    func contains(_ id: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return ids.contains(id)
     }
 }

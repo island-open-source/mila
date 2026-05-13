@@ -141,6 +141,8 @@ struct IslandWhisperApp: App {
         appDelegate.session = session
         appDelegate.dictation = dictation
         appDelegate.modelManager = modelManager
+        appDelegate.actions = actions
+        appDelegate.startScreenLockObserversIfNeeded()
     }
 
     /// Pre-download the two default models on first launch:
@@ -174,8 +176,10 @@ final class IslandWhisperAppDelegate: NSObject, NSApplicationDelegate {
     weak var session: RecordingSession?
     weak var dictation: DictationController?
     weak var modelManager: ModelManager?
+    weak var actions: QuickActionsController?
 
     private var didShutDown = false
+    private var screenLockObserversInstalled = false
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if didShutDown { return .terminateNow }
@@ -194,6 +198,69 @@ final class IslandWhisperAppDelegate: NSObject, NSApplicationDelegate {
         if !didShutDown {
             didShutDown = true
             Task { @MainActor [weak self] in await self?.gracefulShutdown() }
+        }
+    }
+
+    /// Subscribe to the two events that mean "the user just left the
+    /// machine": lid close / display sleep (`NSWorkspace.screensDidSleep`)
+    /// and explicit screen lock from Control Center / hot corner
+    /// (`com.apple.screenIsLocked`, posted on the distributed center).
+    ///
+    /// We stop recording rather than discard it: the user's working
+    /// assumption is "the conversation is over, I want the bit I captured
+    /// saved + transcribed", not "throw it away". Dictation IS discarded
+    /// because there is no recipient app to paste into once the screen is
+    /// locked.
+    ///
+    /// Idempotent — `wireDelegate()` fires every time SwiftUI re-runs
+    /// `.onAppear`, and we MUST NOT register two observers for the same
+    /// event.
+    func startScreenLockObserversIfNeeded() {
+        guard !screenLockObserversInstalled else { return }
+        screenLockObserversInstalled = true
+
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspace.addObserver(
+            self,
+            selector: #selector(handleScreenSleep(_:)),
+            name: NSWorkspace.screensDidSleepNotification,
+            object: nil
+        )
+
+        // Screen-lock from Control Center / hot corner posts here. macOS
+        // does NOT publish this via NSWorkspace — it's only on the
+        // distributed center, under a string name. Without this observer,
+        // recordings would only stop on lid close, not on "Lock Screen".
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(handleScreenLock(_:)),
+            name: NSNotification.Name("com.apple.screenIsLocked"),
+            object: nil
+        )
+    }
+
+    @objc private func handleScreenSleep(_ notification: Notification) {
+        Task { @MainActor [weak self] in await self?.pauseForScreenLock(reason: "screen sleep") }
+    }
+
+    @objc private func handleScreenLock(_ notification: Notification) {
+        Task { @MainActor [weak self] in await self?.pauseForScreenLock(reason: "screen locked") }
+    }
+
+    /// Stop whatever the user was doing because they're no longer at the
+    /// machine. Active recording finalizes and goes to transcription as if
+    /// the user had hit Stop. Active dictation is dropped (a synthesized
+    /// ⌘V into a locked screen is at best useless, at worst leaks the
+    /// transcript onto the lock-screen password field).
+    private func pauseForScreenLock(reason: String) async {
+        guard let actions else { return }
+        if actions.isRecording {
+            print("Screen-lock guard: stopping active recording (\(reason))")
+            await actions.stopRecording()
+        }
+        if let dictation, case .recording = dictation.state {
+            print("Screen-lock guard: cancelling active dictation (\(reason))")
+            await dictation.cancelInFlight()
         }
     }
 

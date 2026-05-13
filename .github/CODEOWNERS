@@ -1,0 +1,10 @@
+# Code owners for IslandWhisper. The org-level `RequirePullRequest` ruleset
+# turns on `require_code_owner_review`, so any PR that touches files matching
+# these patterns needs a review from one of the owners listed here before it
+# can merge to main.
+#
+# Keep this list short on purpose — only people who can actually unblock a
+# release should be code owners. Adding owners that don't pay attention to
+# reviews would silently slow every PR down.
+
+* @urisland @yoavyanuka

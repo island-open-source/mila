@@ -10,6 +10,7 @@ enum LLMRunnerError: LocalizedError {
     case nonZeroExit(code: Int32, stderr: String)
     case timedOut
     case emptyOutput
+    case cancelled
 
     var errorDescription: String? {
         switch self {
@@ -26,6 +27,8 @@ enum LLMRunnerError: LocalizedError {
             return "LLM CLI did not respond within the timeout."
         case .emptyOutput:
             return "LLM CLI returned no output. Check the prompt or your CLI's auth."
+        case .cancelled:
+            return "LLM call was cancelled."
         }
     }
 }
@@ -79,23 +82,37 @@ enum LLMRunner {
                                                override: executablePathOverride)
         let fullPrompt = composedPrompt(prompt, transcript: transcript)
         print("LLMRunner: \(executable.lastPathComponent) prompt=\(fullPrompt.count)c timeout=\(Int(timeout))s")
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    let result = try runProcess(executable: executable,
-                                                arguments: tool.arguments(prompt: fullPrompt),
-                                                timeout: timeout)
-                    continuation.resume(returning: result)
-                } catch {
-                    continuation.resume(throwing: error)
+        // ProcessHandle bridges Swift task cancellation to the underlying
+        // `Process`. The continuation thread `attach`es the real Process
+        // once it's spawned; if the Task was already cancelled by then
+        // (e.g. user hit Cancel between `run(...)` and `Process().run()`),
+        // attach immediately terminates the process. Otherwise an actual
+        // cancel call on the Task fires `onCancel` below, which terminates
+        // the live child.
+        let handle = ProcessHandle()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        let result = try runProcess(executable: executable,
+                                                    arguments: tool.arguments(prompt: fullPrompt),
+                                                    timeout: timeout,
+                                                    handle: handle)
+                        continuation.resume(returning: result)
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
                 }
             }
+        } onCancel: {
+            handle.terminate()
         }
     }
 
     private static func runProcess(executable: URL,
                                    arguments: [String],
-                                   timeout: TimeInterval) throws -> String {
+                                   timeout: TimeInterval,
+                                   handle: ProcessHandle) throws -> String {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
@@ -136,6 +153,13 @@ enum LLMRunner {
         }
         try? stdinPipe.fileHandleForWriting.close()
 
+        // Hand the live process to the handle so a Task cancel can terminate
+        // it. If cancellation already fired before we got here, `attach`
+        // sends SIGTERM right now; the wait-loop below picks up the exit
+        // and we throw `.cancelled` instead of resuming with a partial
+        // result the user no longer cares about.
+        handle.attach(process)
+
         // Read stdout/stderr eagerly on background queues so a chatty CLI
         // can't deadlock by filling the OS pipe buffer while we waitUntilExit.
         var outData = Data()
@@ -166,6 +190,14 @@ enum LLMRunner {
             throw LLMRunnerError.timedOut
         }
         group.wait()
+
+        // The Swift Task that drove us was cancelled mid-flight — `handle`
+        // has SIGTERM'd the process so it likely exited with a non-zero
+        // status, but the user-visible truth is "we cancelled it", not
+        // "the CLI crashed".
+        if handle.wasTerminated {
+            throw LLMRunnerError.cancelled
+        }
 
         let stdout = String(data: outData, encoding: .utf8) ?? ""
         let stderr = String(data: errData, encoding: .utf8) ?? ""
@@ -236,5 +268,39 @@ enum LLMRunner {
             }
         }
         return nil
+    }
+}
+
+/// Bridges Swift `Task` cancellation to the underlying `Process`.
+///
+/// The Task that called `LLMRunner.run` runs on a Swift concurrency thread;
+/// the actual `Process` runs as an external child. There's no direct way to
+/// propagate a Task cancel into the child, so this small handle is the
+/// shared mutable state: the runner `attach`es the live Process; the
+/// `onCancel` arm of `withTaskCancellationHandler` calls `terminate()`,
+/// which SIGTERMs the child. `wasTerminated` lets the wait-loop tell the
+/// difference between "exited on its own with a non-zero status" and "we
+/// killed it because the user cancelled".
+final class ProcessHandle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+    private(set) var wasTerminated = false
+
+    func attach(_ p: Process) {
+        lock.lock(); defer { lock.unlock() }
+        if wasTerminated {
+            // Cancel beat us to attach — the Task was already cancelled
+            // before the Process even started. Reach out and SIGTERM right
+            // now so the child doesn't even get a head start.
+            p.terminate()
+            return
+        }
+        process = p
+    }
+
+    func terminate() {
+        lock.lock(); defer { lock.unlock() }
+        wasTerminated = true
+        process?.terminate()
     }
 }

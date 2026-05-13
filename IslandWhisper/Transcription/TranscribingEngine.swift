@@ -12,9 +12,14 @@ protocol TranscribingEngine: Sendable {
 
     /// Run synchronous transcription on a buffer of mono 16kHz Float32 samples.
     /// `progress` is invoked with values in `0...1` while the work is running.
+    /// `isCancelled` is polled from inside the engine — when it returns true,
+    /// the engine should abort as soon as it can and throw
+    /// `CancellationError()`. Pass `nil` when cancellation isn't wanted (e.g.
+    /// dictation, which is short and uncancellable from the UI).
     func transcribe(samples: [Float],
                     language: String,
-                    progress: (@Sendable (Float) -> Void)?) async throws -> [TranscriptSegment]
+                    progress: (@Sendable (Float) -> Void)?,
+                    isCancelled: (@Sendable () -> Bool)?) async throws -> [TranscriptSegment]
 
     /// Synchronously release any resources (model context, GPU buffers) held
     /// by the engine. Called from the AppDelegate during graceful shutdown so
