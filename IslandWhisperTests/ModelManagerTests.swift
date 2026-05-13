@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import IslandWhisper
 
 @MainActor
@@ -37,6 +38,7 @@ final class ModelManagerTests: XCTestCase {
     }
 
     func test_models_have_consistent_metadata() {
+        let hex = CharacterSet(charactersIn: "0123456789abcdef")
         for model in WhisperModel.all {
             XCTAssertFalse(model.name.isEmpty)
             XCTAssertFalse(model.displayName.isEmpty)
@@ -44,7 +46,46 @@ final class ModelManagerTests: XCTestCase {
             XCTAssertEqual(model.url.scheme, "https")
             XCTAssertTrue(model.url.host?.contains("huggingface.co") == true,
                           "Expected HuggingFace URL for \(model.name)")
+            XCTAssertEqual(model.sha256.count, 64,
+                           "\(model.name) sha256 must be a 64-char hex string")
+            XCTAssertEqual(model.sha256, model.sha256.lowercased(),
+                           "\(model.name) sha256 should be lowercase hex")
+            XCTAssertTrue(CharacterSet(charactersIn: model.sha256).isSubset(of: hex),
+                          "\(model.name) sha256 must be hex-only")
         }
+    }
+
+    func test_verify_sha256_accepts_known_good_file() throws {
+        let path = tempRoot.appendingPathComponent("good.bin")
+        let payload = Data("hello island whisper\n".utf8)
+        try payload.write(to: path)
+        try ModelManager.verifySHA256(at: path, expected: Self.sha256Hex(of: payload))
+    }
+
+    func test_verify_sha256_accepts_multi_chunk_file() throws {
+        // Force the streaming loop to iterate more than once (chunk size is 1 MiB).
+        let path = tempRoot.appendingPathComponent("large.bin")
+        let payload = Data(repeating: 0x5A, count: 3 * (1 << 20) + 17)
+        try payload.write(to: path)
+        try ModelManager.verifySHA256(at: path, expected: Self.sha256Hex(of: payload))
+    }
+
+    func test_verify_sha256_rejects_tampered_file() throws {
+        let path = tempRoot.appendingPathComponent("bad.bin")
+        try Data("the real bytes".utf8).write(to: path)
+        let tamperedExpected = Self.sha256Hex(of: Data("different bytes".utf8))
+        XCTAssertThrowsError(
+            try ModelManager.verifySHA256(at: path, expected: tamperedExpected)
+        ) { error in
+            guard case ModelManager.VerifyError.sha256Mismatch = error else {
+                XCTFail("Expected sha256Mismatch, got \(error)")
+                return
+            }
+        }
+    }
+
+    private static func sha256Hex(of data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     func test_url_for_model_lives_under_models_directory() {

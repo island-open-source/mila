@@ -1,5 +1,10 @@
 import Foundation
 import Combine
+import CryptoKit
+import os.log
+
+private let modelLogger = Logger(subsystem: "io.island.whisper.IslandWhisper",
+                                 category: "models")
 
 /// Catalog of supported ggml models. Add more here as needed.
 struct WhisperModel: Identifiable, Hashable, Codable {
@@ -8,6 +13,11 @@ struct WhisperModel: Identifiable, Hashable, Codable {
     var displayName: String
     var url: URL
     var sizeBytes: Int64
+    /// Lowercase hex SHA-256 of the file at `url`. Pinned so that a
+    /// compromised HuggingFace repo (or any swap of the .bin between the URL
+    /// being fetched and our parser opening it) is rejected before the bytes
+    /// ever reach whisper.cpp's GGML loader.
+    var sha256: String
     var languageHint: String
 
     /// Hebrew default. The full ivrit.ai `large-v3` finetune (~3 GB, ~2x
@@ -18,7 +28,8 @@ struct WhisperModel: Identifiable, Hashable, Codable {
         name: "ivrit-ai-whisper-large-v3",
         displayName: "ivrit.ai · large-v3 (Hebrew)",
         url: URL(string: "https://huggingface.co/ivrit-ai/whisper-large-v3-ggml/resolve/main/ggml-model.bin")!,
-        sizeBytes: 3_094_023_488,
+        sizeBytes: 3_095_033_483,
+        sha256: "09e66ec67b2e00c6933afab6684cbf78fe023e8ad153c1848f62000e4335a07f",
         languageHint: "he"
     )
 
@@ -31,6 +42,7 @@ struct WhisperModel: Identifiable, Hashable, Codable {
         displayName: "OpenAI · large-v3-turbo (English / multilingual)",
         url: URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin")!,
         sizeBytes: 1_624_555_275,
+        sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
         languageHint: "en"
     )
 
@@ -135,6 +147,36 @@ final class ModelManager: NSObject, ObservableObject {
         downloads.removeAll()
         session.invalidateAndCancel()
     }
+
+    enum VerifyError: Swift.Error, LocalizedError {
+        case sha256Mismatch(expected: String, computed: String)
+
+        var errorDescription: String? {
+            switch self {
+            case .sha256Mismatch(let expected, let computed):
+                return "SHA-256 mismatch (expected \(expected), got \(computed))"
+            }
+        }
+    }
+
+    /// Streaming SHA-256 of the file at `fileURL`. Throws `VerifyError`
+    /// on mismatch. Streamed in 1 MiB chunks so we don't have to load the
+    /// whole multi-GB .bin into memory. `nonisolated` so we can dispatch
+    /// the multi-second hash off the main actor.
+    nonisolated static func verifySHA256(at fileURL: URL, expected: String) throws {
+        let handle = try FileHandle(forReadingFrom: fileURL)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        let computed = hasher.finalize()
+            .map { String(format: "%02x", $0) }
+            .joined()
+        if computed.lowercased() != expected.lowercased() {
+            throw VerifyError.sha256Mismatch(expected: expected, computed: computed)
+        }
+    }
 }
 
 extension ModelManager: URLSessionDownloadDelegate {
@@ -158,17 +200,48 @@ extension ModelManager: URLSessionDownloadDelegate {
         let id = downloadTask.taskIdentifier
         let tempCopy = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString + ".bin")
-        try? FileManager.default.moveItem(at: location, to: tempCopy)
+        let moveErr: Error?
+        do {
+            try FileManager.default.moveItem(at: location, to: tempCopy)
+            moveErr = nil
+        } catch {
+            moveErr = error
+        }
         Task { @MainActor in
             guard let model = self.observers.removeValue(forKey: id) else { return }
+            // Keep `downloads[model.name]` set until we're truly done (verified
+            // AND installed, or failed) — otherwise during the multi-second
+            // off-main hash the duplicate-download guard in `download(_:)` and
+            // the auto-download check in `ensureDefaultModelsInstalled` both
+            // see no in-flight download and can kick off a redundant fetch of
+            // the same 3 GB file.
+            defer { self.downloads.removeValue(forKey: model.name) }
+            if let moveErr {
+                modelLogger.error("Download \(model.name, privacy: .public): failed to capture URLSession temp file: \(moveErr.localizedDescription, privacy: .public)")
+                return
+            }
+            // Hash off the main actor — for the 3 GB ivritLarge model this is
+            // a multi-second blocking read, and we don't want to freeze the UI
+            // (progress sheet, settings list) while it runs.
+            let expected = model.sha256
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try ModelManager.verifySHA256(at: tempCopy, expected: expected)
+                }.value
+                modelLogger.notice("Download \(model.name, privacy: .public): SHA-256 verified")
+            } catch {
+                try? FileManager.default.removeItem(at: tempCopy)
+                modelLogger.error("Download \(model.name, privacy: .public): integrity check failed: \(error.localizedDescription, privacy: .public)")
+                return
+            }
             let dest = self.url(for: model)
             try? FileManager.default.removeItem(at: dest)
             do {
                 try FileManager.default.moveItem(at: tempCopy, to: dest)
+                modelLogger.notice("Download \(model.name, privacy: .public): installed at \(dest.path, privacy: .public)")
             } catch {
-                print("Move failed: \(error)")
+                modelLogger.error("Download \(model.name, privacy: .public): final move failed: \(error.localizedDescription, privacy: .public)")
             }
-            self.downloads.removeValue(forKey: model.name)
             self.refreshInstalled()
         }
     }
@@ -181,7 +254,7 @@ extension ModelManager: URLSessionDownloadDelegate {
         Task { @MainActor in
             if let model = self.observers.removeValue(forKey: id) {
                 self.downloads.removeValue(forKey: model.name)
-                print("Download \(model.name) failed: \(error)")
+                modelLogger.error("Download \(model.name, privacy: .public): network/task failure: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
