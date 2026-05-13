@@ -237,15 +237,18 @@ final class DiarizationSettings: ObservableObject {
             if result.allGood {
                 verificationStatus = .verified
                 persistVerified()
-            } else if !result.pyannoteInstalled {
-                verificationStatus = .verificationFailed("pyannote.audio not installed")
-            } else if !result.torchInstalled {
-                verificationStatus = .verificationFailed("torch not installed")
-            } else if result.models.contains(where: { !$0.accessible }) {
-                let denied = result.models.filter { !$0.accessible }
-                let summary = denied.map { $0.name.components(separatedBy: "/").last ?? $0.name }
-                    .joined(separator: ", ")
-                verificationStatus = .verificationFailed("Terms not accepted: \(summary)")
+            } else {
+                clearVerified()
+                if !result.pyannoteInstalled {
+                    verificationStatus = .verificationFailed("pyannote.audio not installed")
+                } else if !result.torchInstalled {
+                    verificationStatus = .verificationFailed("torch not installed")
+                } else if result.models.contains(where: { !$0.accessible }) {
+                    let denied = result.models.filter { !$0.accessible }
+                    let summary = denied.map { $0.name.components(separatedBy: "/").last ?? $0.name }
+                        .joined(separator: ", ")
+                    verificationStatus = .verificationFailed("Terms not accepted: \(summary)")
+                }
             }
         } catch {
             verificationStatus = .verificationFailed("Verification failed")
