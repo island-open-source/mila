@@ -65,7 +65,7 @@ private struct SidebarFooter: View {
             }
             .buttonStyle(.plain)
             .simultaneousGesture(TapGesture().onEnded {
-                SettingsNavigation.pendingTab = .speakers
+                SettingsNavigation.shared.pendingTab = .speakers
             })
             .help(needsAttention ? "Click to configure speaker diarization" : diarizationStatus.label)
 

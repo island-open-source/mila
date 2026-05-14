@@ -6,8 +6,10 @@ enum SettingsTab: Int, Hashable {
     case hotkeys, audio, models, llm, speakers
 }
 
-enum SettingsNavigation {
-    @MainActor static var pendingTab: SettingsTab?
+@Observable
+final class SettingsNavigation {
+    @MainActor static let shared = SettingsNavigation()
+    var pendingTab: SettingsTab?
 }
 
 /// Standard `Settings` scene. Opened via `Cmd+,` from the menu bar.
@@ -35,9 +37,15 @@ struct SettingsView: View {
         .frame(width: 560, height: 560)
         .padding(20)
         .onAppear {
-            if let tab = SettingsNavigation.pendingTab {
+            if let tab = SettingsNavigation.shared.pendingTab {
                 selectedTab = tab
-                SettingsNavigation.pendingTab = nil
+                SettingsNavigation.shared.pendingTab = nil
+            }
+        }
+        .onChange(of: SettingsNavigation.shared.pendingTab) { _, newTab in
+            if let tab = newTab {
+                selectedTab = tab
+                SettingsNavigation.shared.pendingTab = nil
             }
         }
     }
