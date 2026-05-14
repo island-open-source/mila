@@ -11,12 +11,6 @@ final class DiarizationSettings: ObservableObject {
             }
         }
     }
-    @Published var hfToken: String {
-        didSet {
-            KeychainHelper.save(key: "diarization.hfToken", value: hfToken)
-            invalidateIfChanged()
-        }
-    }
     @Published var pythonPath: String {
         didSet {
             defaults.set(pythonPath, forKey: "diarization.pythonPath")
@@ -31,18 +25,13 @@ final class DiarizationSettings: ObservableObject {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         self.isEnabled = defaults.bool(forKey: "diarization.enabled")
-        let token = KeychainHelper.load(key: "diarization.hfToken")
-            ?? defaults.string(forKey: "diarization.hfToken")
-            ?? ""
-        self.hfToken = token
-        if !token.isEmpty && defaults.string(forKey: "diarization.hfToken") != nil {
-            KeychainHelper.save(key: "diarization.hfToken", value: token)
-            defaults.removeObject(forKey: "diarization.hfToken")
-        }
         let path = defaults.string(forKey: "diarization.pythonPath") ?? "/usr/bin/python3"
         self.pythonPath = path
         self._pythonFound = Published(initialValue: FileManager.default.fileExists(atPath: path))
         restoreVerifiedState()
+        if isEnabled && pythonFound && verificationStatus != .verified {
+            Task { await checkDeps() }
+        }
     }
 
     private var isVerified: Bool {
@@ -51,20 +40,17 @@ final class DiarizationSettings: ObservableObject {
 
     private func persistVerified() {
         defaults.set(true, forKey: "diarization.verified")
-        KeychainHelper.save(key: "diarization.verifiedToken", value: hfToken)
         defaults.set(pythonPath, forKey: "diarization.verifiedPythonPath")
     }
 
     private func clearVerified() {
         defaults.set(false, forKey: "diarization.verified")
-        KeychainHelper.delete(key: "diarization.verifiedToken")
         defaults.removeObject(forKey: "diarization.verifiedPythonPath")
     }
 
     private func invalidateIfChanged() {
-        let savedToken = KeychainHelper.load(key: "diarization.verifiedToken") ?? ""
         let savedPath = defaults.string(forKey: "diarization.verifiedPythonPath") ?? ""
-        if hfToken != savedToken || pythonPath != savedPath {
+        if pythonPath != savedPath {
             clearVerified()
             verificationStatus = .disabled
             lastVerifyResult = nil
@@ -73,24 +59,20 @@ final class DiarizationSettings: ObservableObject {
 
     private func restoreVerifiedState() {
         guard isEnabled && isVerified else { return }
-        let savedToken = KeychainHelper.load(key: "diarization.verifiedToken") ?? ""
         let savedPath = defaults.string(forKey: "diarization.verifiedPythonPath") ?? ""
-        if hfToken == savedToken && pythonPath == savedPath
-            && !hfToken.isEmpty && pythonFound {
+        if pythonPath == savedPath && pythonFound {
             verificationStatus = .verified
         }
     }
 
     var isConfigured: Bool {
-        isEnabled && !hfToken.isEmpty
+        isEnabled && status.isGood
     }
 
     enum SetupStatus: Equatable {
         case disabled
         case checking
         case missingDeps
-        case depsInstalled
-        case missingToken
         case pythonNotFound
         case notVerified
         case verifying
@@ -101,11 +83,9 @@ final class DiarizationSettings: ObservableObject {
             switch self {
             case .disabled:                    return "Disabled"
             case .checking:                    return "Checking…"
-            case .missingDeps:                 return "Dependencies missing"
-            case .depsInstalled:               return "Deps OK — enter token"
-            case .missingToken:                return "Token missing"
+            case .missingDeps:                 return "Setup needed"
             case .pythonNotFound:              return "Python not found"
-            case .notVerified:                 return "Not verified"
+            case .notVerified:                 return "Setup needed"
             case .verifying:                   return "Verifying…"
             case .verified:                    return "Ready"
             case .verificationFailed(let msg): return msg
@@ -117,8 +97,6 @@ final class DiarizationSettings: ObservableObject {
             case .disabled:              return "circle"
             case .checking:              return "arrow.triangle.2.circlepath"
             case .missingDeps:           return "exclamationmark.triangle.fill"
-            case .depsInstalled:         return "checkmark.circle"
-            case .missingToken:          return "exclamationmark.triangle.fill"
             case .pythonNotFound:        return "exclamationmark.triangle.fill"
             case .notVerified:           return "questionmark.circle.fill"
             case .verifying:             return "arrow.triangle.2.circlepath"
@@ -129,9 +107,9 @@ final class DiarizationSettings: ObservableObject {
 
         var color: StatusColor {
             switch self {
-            case .disabled, .checking, .notVerified, .depsInstalled:
+            case .disabled, .checking, .notVerified:
                 return .secondary
-            case .missingDeps, .missingToken, .pythonNotFound:
+            case .missingDeps, .pythonNotFound:
                 return .orange
             case .verified:
                 return .green
@@ -166,7 +144,6 @@ final class DiarizationSettings: ObservableObject {
         if case .verified = verificationStatus { return .verified }
         if needsDepsInstall { return .missingDeps }
         if let result = lastVerifyResult, result.pyannoteInstalled && result.torchInstalled {
-            if hfToken.isEmpty { return .depsInstalled }
             if case .verificationFailed(let msg) = verificationStatus {
                 return .verificationFailed(msg)
             }
@@ -179,7 +156,7 @@ final class DiarizationSettings: ObservableObject {
     }
 
     var canVerify: Bool {
-        isEnabled && !hfToken.isEmpty && pythonFound && !needsDepsInstall
+        isEnabled && pythonFound && !needsDepsInstall
     }
 
     var needsDepsInstall: Bool {
@@ -193,10 +170,7 @@ final class DiarizationSettings: ObservableObject {
         verificationStatus = .checking
         lastVerifyResult = nil
         do {
-            let result = try await SpeakerDiarizer.verifySetup(
-                pythonPath: pythonPath,
-                hfToken: hfToken
-            )
+            let result = try await SpeakerDiarizer.verifySetup(pythonPath: pythonPath)
             lastVerifyResult = result
             if result.allGood {
                 verificationStatus = .verified
@@ -228,10 +202,7 @@ final class DiarizationSettings: ObservableObject {
         verificationStatus = .verifying
         lastVerifyResult = nil
         do {
-            let result = try await SpeakerDiarizer.verifySetup(
-                pythonPath: pythonPath,
-                hfToken: hfToken
-            )
+            let result = try await SpeakerDiarizer.verifySetup(pythonPath: pythonPath)
             lastVerifyResult = result
 
             if result.allGood {
@@ -243,11 +214,6 @@ final class DiarizationSettings: ObservableObject {
                     verificationStatus = .verificationFailed("pyannote.audio not installed")
                 } else if !result.torchInstalled {
                     verificationStatus = .verificationFailed("torch not installed")
-                } else if result.models.contains(where: { !$0.accessible }) {
-                    let denied = result.models.filter { !$0.accessible }
-                    let summary = denied.map { $0.name.components(separatedBy: "/").last ?? $0.name }
-                        .joined(separator: ", ")
-                    verificationStatus = .verificationFailed("Terms not accepted: \(summary)")
                 }
             }
         } catch {

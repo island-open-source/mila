@@ -234,7 +234,6 @@ final class TranscriptionService: ObservableObject {
             // compute paths (Python/MPS vs whisper.cpp/Metal) and both read
             // from the same WAV file, so parallelism is safe and saves time.
             let shouldDiarize = diarizationSettings.isConfigured
-            let diarHfToken = diarizationSettings.hfToken
             let diarPythonPath = diarizationSettings.pythonPath
 
             async let diarizeTask: [SpeakerTurn] = {
@@ -243,7 +242,6 @@ final class TranscriptionService: ObservableObject {
                 do {
                     let turns = try await SpeakerDiarizer.diarize(
                         wavURL: audioURL,
-                        hfToken: diarHfToken,
                         pythonPath: diarPythonPath
                     )
                     let speakerCount = Set(turns.map(\.speaker)).count

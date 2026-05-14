@@ -2,23 +2,46 @@ import SwiftUI
 import AppKit
 import Carbon.HIToolbox
 
+enum SettingsTab: Int, Hashable {
+    case hotkeys, audio, models, llm, speakers
+}
+
+@Observable
+final class SettingsNavigation {
+    @MainActor static let shared = SettingsNavigation()
+    var pendingTab: SettingsTab?
+}
+
 /// Standard `Settings` scene. Opened via `Cmd+,` from the menu bar.
 struct SettingsView: View {
+    @State private var selectedTab: SettingsTab = .hotkeys
+
     var body: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             HotkeysSettingsTab()
                 .tabItem { Label("Hotkeys", systemImage: "command") }
+                .tag(SettingsTab.hotkeys)
             AudioSettingsTab()
                 .tabItem { Label("Audio", systemImage: "mic") }
+                .tag(SettingsTab.audio)
             ModelsSettingsTab()
                 .tabItem { Label("Models", systemImage: "cube.box") }
+                .tag(SettingsTab.models)
             LLMSettingsTab()
                 .tabItem { Label("LLM", systemImage: "sparkles") }
+                .tag(SettingsTab.llm)
             DiarizationSettingsTab()
                 .tabItem { Label("Speakers", systemImage: "person.2") }
+                .tag(SettingsTab.speakers)
         }
         .frame(width: 560, height: 560)
         .padding(20)
+        .onChange(of: SettingsNavigation.shared.pendingTab, initial: true) { _, newTab in
+            if let tab = newTab {
+                selectedTab = tab
+                SettingsNavigation.shared.pendingTab = nil
+            }
+        }
     }
 }
 
@@ -491,7 +514,7 @@ private struct DiarizationSettingsTab: View {
                     statusBadge
                 }
 
-                Text("Identify who is speaking in your recordings. Everything runs on your Mac — no audio leaves your machine.")
+                Text("Identify who is speaking in your recordings. Speaker models are included — just install Python dependencies to get started.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -499,19 +522,11 @@ private struct DiarizationSettingsTab: View {
                 Toggle("Enable speaker diarization", isOn: $diarization.isEnabled)
 
                 if diarization.isEnabled {
-                    // Step 1: deps — auto-checked, install button if missing
                     depsSection
 
-                    // Step 2: token + model access — only after deps are OK
                     if !diarization.needsDepsInstall,
                        let result = diarization.lastVerifyResult,
                        result.pyannoteInstalled && result.torchInstalled {
-                        Divider()
-                        tokenSection
-                    }
-
-                    // Step 3: full verify — only when token is entered
-                    if diarization.canVerify {
                         Divider()
                         verifySection
                     }
@@ -616,41 +631,7 @@ private struct DiarizationSettingsTab: View {
         }
     }
 
-    // MARK: - Step 2: Token
-
-    @ViewBuilder
-    private var tokenSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Hugging Face token")
-                .font(.callout.weight(.medium))
-            Text("A free token is needed to download the speaker model. Create an account, accept the model licenses, then paste a token with Read scope.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: 6) {
-                SecureField("hf_...", text: $diarization.hfToken)
-                    .textFieldStyle(.roundedBorder)
-                if !diarization.hfToken.isEmpty {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text("1. Accept both model licenses:")
-                    .font(.caption).foregroundStyle(.secondary)
-                Text("   huggingface.co/pyannote/speaker-diarization-3.1")
-                    .font(.caption).foregroundStyle(.tertiary)
-                Text("   huggingface.co/pyannote/segmentation-3.0")
-                    .font(.caption).foregroundStyle(.tertiary)
-                Text("2. Create token: huggingface.co/settings/tokens")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    // MARK: - Step 3: Verify
+    // MARK: - Step 2: Check Setup
 
     @ViewBuilder
     private var verifySection: some View {
@@ -663,9 +644,9 @@ private struct DiarizationSettingsTab: View {
                     ProgressView()
                         .controlSize(.small)
                         .padding(.trailing, 2)
-                    Text("Verifying…")
+                    Text("Checking…")
                 } else {
-                    Label("Verify setup", systemImage: "checkmark.shield")
+                    Label("Check setup", systemImage: "checkmark.shield")
                 }
             }
             .disabled(status == .verifying)
@@ -697,14 +678,6 @@ private struct DiarizationSettingsTab: View {
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-            } else if case .verificationFailed(let msg) = status, msg.contains("not accepted") {
-                Text("Open the model links above and click \"Agree and access repository\" on each page.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
             }
         }
     }
@@ -712,19 +685,10 @@ private struct DiarizationSettingsTab: View {
     @ViewBuilder
     private func verifyResultChecklist(_ result: SpeakerDiarizer.VerifyResult) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(result.models, id: \.name) { model in
-                let shortName = model.name.components(separatedBy: "/").last ?? model.name
-                if model.accessible {
-                    verifyCheckRow(shortName, ok: true)
-                } else {
-                    verifyCheckRow(shortName, ok: false,
-                                   detail: model.error == "terms_not_accepted"
-                                       ? "Accept terms at huggingface.co/\(model.name)"
-                                       : model.error == "invalid_token"
-                                           ? "Token is invalid or missing read scope"
-                                           : model.error)
-                }
-            }
+            verifyCheckRow("pyannote.audio", ok: result.pyannoteInstalled,
+                           detail: result.pyannoteInstalled ? nil : "Run 'Install dependencies' above")
+            verifyCheckRow("torch", ok: result.torchInstalled,
+                           detail: result.torchInstalled ? nil : "Run 'Install dependencies' above")
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)

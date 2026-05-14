@@ -8,6 +8,10 @@ struct SpeakerTurn: Codable {
 
 enum SpeakerDiarizer {
 
+    private static var bundledModelsPath: String? {
+        Bundle.main.path(forResource: "DiarizationModels", ofType: nil)
+    }
+
     enum Error: Swift.Error, LocalizedError {
         case pythonNotFound(String)
         case diarizationFailed(String)
@@ -76,9 +80,13 @@ enum SpeakerDiarizer {
         return output
     }
 
-    static func diarize(wavURL: URL, hfToken: String, pythonPath: String) async throws -> [SpeakerTurn] {
+    static func diarize(wavURL: URL, pythonPath: String) async throws -> [SpeakerTurn] {
+        guard let modelsPath = bundledModelsPath else {
+            throw Error.diarizationFailed("Bundled diarization models not found in app")
+        }
+
         let script = """
-        import json, sys, os, types
+        import json, sys, os, types, tempfile
 
         try:
             import speechbrain.utils.importutils as _sbiu
@@ -103,32 +111,45 @@ enum SpeakerDiarizer {
         from pyannote.audio import Pipeline
 
         wav_path = sys.argv[1]
-        print(f"diarize: loading pipeline...", file=sys.stderr)
-        pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
-        if torch.backends.mps.is_available():
-            pipeline.to(torch.device("mps"))
-            print(f"diarize: using MPS", file=sys.stderr)
+        models_dir = sys.argv[2]
 
-        print(f"diarize: running on {wav_path}", file=sys.stderr)
-        diar = pipeline(wav_path)
-        annotation = getattr(diar, "speaker_diarization", diar)
+        config_path = os.path.join(models_dir, "config.yaml")
+        with open(config_path) as f:
+            config_text = f.read().replace("__MODELS_DIR__", models_dir)
 
-        turns = []
-        for turn, _, speaker in annotation.itertracks(yield_label=True):
-            turns.append({
-                "start": round(turn.start, 3),
-                "end": round(turn.end, 3),
-                "speaker": speaker,
-            })
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
+        tmp.write(config_text)
+        tmp.close()
 
-        print(f"diarize: found {len(set(t['speaker'] for t in turns))} speakers, {len(turns)} turns", file=sys.stderr)
-        json.dump(turns, sys.stdout)
+        try:
+            print(f"diarize: loading pipeline from {models_dir}", file=sys.stderr)
+            pipeline = Pipeline.from_pretrained(tmp.name)
+            if torch.backends.mps.is_available():
+                pipeline.to(torch.device("mps"))
+                print(f"diarize: using MPS", file=sys.stderr)
+
+            print(f"diarize: running on {wav_path}", file=sys.stderr)
+            diar = pipeline(wav_path)
+            annotation = getattr(diar, "speaker_diarization", diar)
+
+            turns = []
+            for turn, _, speaker in annotation.itertracks(yield_label=True):
+                turns.append({
+                    "start": round(turn.start, 3),
+                    "end": round(turn.end, 3),
+                    "speaker": speaker,
+                })
+
+            print(f"diarize: found {len(set(t['speaker'] for t in turns))} speakers, {len(turns)} turns", file=sys.stderr)
+            json.dump(turns, sys.stdout)
+        finally:
+            os.unlink(tmp.name)
         """
 
         let result = try await runPython(
             path: pythonPath,
-            arguments: ["-c", script, wavURL.path],
-            environment: ["HF_TOKEN": hfToken]
+            arguments: ["-c", script, wavURL.path, modelsPath],
+            environment: [:]
         )
         guard result.exitCode == 0 else {
             let errMsg = String(data: result.stderr, encoding: .utf8) ?? "exit code \(result.exitCode)"
@@ -140,27 +161,19 @@ enum SpeakerDiarizer {
     struct VerifyResult: Codable {
         let pyannoteInstalled: Bool
         let torchInstalled: Bool
-        let models: [ModelCheck]
-
-        struct ModelCheck: Codable {
-            let name: String
-            let accessible: Bool
-            let error: String?
-        }
 
         var allGood: Bool {
-            pyannoteInstalled && torchInstalled && models.allSatisfy(\.accessible)
+            pyannoteInstalled && torchInstalled
         }
     }
 
-    static func verifySetup(pythonPath: String, hfToken: String) async throws -> VerifyResult {
+    static func verifySetup(pythonPath: String) async throws -> VerifyResult {
         let script = """
-        import json, sys, os
+        import json, sys
 
         result = {
             "pyannoteInstalled": False,
             "torchInstalled": False,
-            "models": [],
         }
 
         try:
@@ -175,32 +188,12 @@ enum SpeakerDiarizer {
         except ImportError:
             pass
 
-        if result["pyannoteInstalled"]:
-            from huggingface_hub import HfApi
-            token = os.environ.get("HF_TOKEN", "")
-            api = HfApi(token=token)
-            for model_id in ["pyannote/speaker-diarization-3.1", "pyannote/segmentation-3.0"]:
-                check = {"name": model_id, "accessible": False, "error": None}
-                try:
-                    api.model_info(model_id)
-                    check["accessible"] = True
-                except Exception as e:
-                    msg = str(e)
-                    if "403" in msg or "gated" in msg.lower() or "Access" in msg:
-                        check["error"] = "terms_not_accepted"
-                    elif "401" in msg or "unauthorized" in msg.lower():
-                        check["error"] = "invalid_token"
-                    else:
-                        check["error"] = msg[:200]
-                result["models"].append(check)
-
         json.dump(result, sys.stdout)
         """
 
         let result = try await runPython(
             path: pythonPath,
-            arguments: ["-c", script],
-            environment: ["HF_TOKEN": hfToken]
+            arguments: ["-c", script]
         )
         guard !result.stdout.isEmpty else {
             let errMsg = String(data: result.stderr, encoding: .utf8) ?? "no output"

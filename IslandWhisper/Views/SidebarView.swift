@@ -45,21 +45,29 @@ private struct SidebarFooter: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: "person.2")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text("Speakers")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Image(systemName: diarizationStatus.sfSymbol)
-                    .font(.caption)
-                    .foregroundStyle(footerStatusColor)
-                Text(diarizationStatus.label)
-                    .font(.caption)
-                    .foregroundStyle(footerStatusColor)
+            SettingsLink {
+                HStack(spacing: 6) {
+                    Image(systemName: "person.2")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Speakers")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Image(systemName: diarizationStatus.sfSymbol)
+                        .font(.caption)
+                        .foregroundStyle(footerStatusColor)
+                    Text(diarizationStatus.label)
+                        .font(.caption)
+                        .foregroundStyle(footerStatusColor)
+                        .lineLimit(1)
+                }
             }
+            .buttonStyle(.plain)
+            .simultaneousGesture(TapGesture().onEnded {
+                SettingsNavigation.shared.pendingTab = .speakers
+            })
+            .help(needsAttention ? "Click to configure speaker diarization" : diarizationStatus.label)
 
             SettingsLink {
                 Label("Settings…", systemImage: "gear")
@@ -67,6 +75,15 @@ private struct SidebarFooter: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
+        }
+    }
+
+    private var needsAttention: Bool {
+        switch diarizationStatus {
+        case .missingDeps, .pythonNotFound, .notVerified, .verificationFailed:
+            return true
+        default:
+            return false
         }
     }
 

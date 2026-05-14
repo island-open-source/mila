@@ -17,8 +17,8 @@ settings:
     SWIFT_STRICT_CONCURRENCY: minimal
     GENERATE_INFOPLIST_FILE: NO
     PRODUCT_BUNDLE_IDENTIFIER: io.island.whisper.IslandWhisper
-    MARKETING_VERSION: "1.3.1"
-    CURRENT_PROJECT_VERSION: "13"
+    MARKETING_VERSION: "1.3.2"
+    CURRENT_PROJECT_VERSION: "14"
 
 packages:
   TranscriptionCore:
@@ -37,6 +37,10 @@ targets:
         excludes:
           - "Resources/Info.plist"
           - "Resources/IslandWhisper.entitlements"
+          - "Resources/DiarizationModels"
+      - path: IslandWhisper/Resources/DiarizationModels
+        type: folder
+        buildPhase: resources
     resources:
       - path: IslandWhisper/Assets.xcassets
     info:
