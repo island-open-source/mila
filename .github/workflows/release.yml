@@ -160,6 +160,29 @@ jobs:
             "${{ steps.version.outputs.version }}"
           ls -la "${DMG}"
           echo "dmg=${DMG}" >> "$GITHUB_OUTPUT"
+
+      - name: Package Sparkle ZIP
+        id: zip
+        run: |
+          set -euo pipefail
+          # Sparkle 2.x can handle DMG updates but the DMG path requires
+          # hdiutil mount inside the sandboxed Installer.xpc service. With
+          # the ~150 MB bundled Python runtime + 280 nested signed binaries
+          # introduced in v1.3.5, that path fails for some users with
+          # "Update Error while extracting the archive" during the mount/
+          # copy phase. The ZIP path avoids hdiutil entirely — Sparkle
+          # extracts in-process with libarchive — and is the format Sparkle
+          # officially recommends for updates.
+          #
+          # We use `ditto -c -k` rather than `zip`: ditto is the macOS-aware
+          # archiver that preserves extended attributes, symlinks, hard
+          # links, and resource forks. zip silently drops xattrs which
+          # breaks code signatures.
+          APP="build-release/Build/Products/Release/IslandWhisper.app"
+          ZIP="IslandWhisper-${{ steps.version.outputs.version }}.zip"
+          ditto -c -k --keepParent "$APP" "$ZIP"
+          ls -la "$ZIP"
+          echo "zip=${ZIP}" >> "$GITHUB_OUTPUT"
           # Sanity check: every release MUST be signed by our self-signed
           # identity, otherwise TCC permissions will reset for users on
           # upgrade — the entire point of the cert. We verify the *shipped*
@@ -192,7 +215,7 @@ jobs:
           role-to-assume: ${{ vars.ISLAND_WHISPER_AWS_ROLE_ARN }}
           aws-region: us-east-1
 
-      - name: Sign DMG with Sparkle EdDSA + publish to update server
+      - name: Sign ZIP with Sparkle EdDSA + publish to update server
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
           BUCKET: island-whisper-updates
@@ -200,17 +223,19 @@ jobs:
         run: |
           set -euo pipefail
           DMG="${{ steps.dmg.outputs.dmg }}"
+          ZIP="${{ steps.zip.outputs.zip }}"
           # Sparkle's CLI tools are checked out by SPM during the release
           # build above, into the derived-data SourcePackages/artifacts/
           # tree. They are not part of the IslandWhisper.app bundle.
           SPARKLE_BIN="build-release/SourcePackages/artifacts/sparkle/Sparkle/bin"
 
           # `sign_update --ed-key-file -` reads the EdDSA private key from
-          # stdin, computes the Ed25519 signature over the DMG bytes, and
+          # stdin, computes the Ed25519 signature over the ZIP bytes, and
           # prints `sparkle:edSignature="..." length="..."` ready to drop
-          # into the appcast <enclosure>.
-          SIG_LINE=$(printf '%s' "$SPARKLE_PRIVATE_KEY" | "$SPARKLE_BIN/sign_update" --ed-key-file - "$DMG")
-          echo "sign_update -> $SIG_LINE"
+          # into the appcast <enclosure>. The Sparkle appcast now points
+          # at the ZIP, not the DMG.
+          SIG_LINE=$(printf '%s' "$SPARKLE_PRIVATE_KEY" | "$SPARKLE_BIN/sign_update" --ed-key-file - "$ZIP")
+          echo "sign_update (zip) -> $SIG_LINE"
           SIG=$(printf '%s' "$SIG_LINE" | sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p')
           LEN=$(printf '%s' "$SIG_LINE" | sed -n 's/.*length="\([^"]*\)".*/\1/p')
           if [ -z "$SIG" ] || [ -z "$LEN" ]; then
@@ -227,16 +252,21 @@ jobs:
           python3 scripts/update-appcast.py \
             --version "${{ steps.version.outputs.version }}" \
             --build "${{ steps.version.outputs.build }}" \
-            --dmg-name "$DMG" \
+            --artifact-name "$ZIP" \
             --signature "$SIG" \
             --length "$LEN" \
             --feed-url-base "$FEED_URL_BASE" \
             --appcast-in appcast.xml \
             --appcast-out appcast.xml
 
-          # Upload the DMG first so a Sparkle client that polls the feed
-          # the instant we finish always finds the file referenced by the
-          # appcast it just downloaded.
+          # Upload the ZIP (the artifact Sparkle downloads) before the
+          # appcast so a polling client never sees a 404 between feed
+          # publish and asset publish.
+          aws s3 cp "$ZIP" "s3://${BUCKET}/${ZIP}" \
+            --content-type application/zip
+
+          # Upload the DMG for users who'd rather download directly. It's
+          # not in the appcast — Sparkle uses the ZIP.
           aws s3 cp "$DMG" "s3://${BUCKET}/${DMG}" \
             --content-type application/octet-stream
           # Also publish under a stable "latest" name so people can link to

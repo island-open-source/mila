@@ -36,9 +36,12 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--version", required=True, help="Marketing version, e.g. 1.2.3")
     p.add_argument("--build", required=True, help="Build number, e.g. 6")
-    p.add_argument("--dmg-name", required=True, help="DMG filename (no path)")
+    p.add_argument("--artifact-name", help="Update artifact filename (no path) — typically a .zip for Sparkle updates")
+    # Deprecated alias kept for transitional release workflows that haven't
+    # been updated yet. Removed once everything is migrated.
+    p.add_argument("--dmg-name", help=argparse.SUPPRESS)
     p.add_argument("--signature", required=True, help="EdDSA signature from sign_update")
-    p.add_argument("--length", required=True, help="DMG byte length from sign_update")
+    p.add_argument("--length", required=True, help="Artifact byte length from sign_update")
     p.add_argument("--minimum-system-version", default="14.0")
     p.add_argument("--feed-url-base", required=True,
                    help="Public base URL where DMGs live, e.g. https://island-whisper-updates.internal.island.io")
@@ -68,7 +71,7 @@ def make_item(args: argparse.Namespace) -> ET.Element:
     sparkle_min = ET.SubElement(item, f"{{{SPARKLE_NS}}}minimumSystemVersion")
     sparkle_min.text = args.minimum_system_version
     ET.SubElement(item, "enclosure", {
-        "url": f"{args.feed_url_base.rstrip('/')}/{args.dmg_name}",
+        "url": f"{args.feed_url_base.rstrip('/')}/{args.artifact_name}",
         f"{{{SPARKLE_NS}}}version": args.build,
         f"{{{SPARKLE_NS}}}shortVersionString": args.version,
         f"{{{SPARKLE_NS}}}edSignature": args.signature,
@@ -80,6 +83,13 @@ def make_item(args: argparse.Namespace) -> ET.Element:
 
 def main() -> int:
     args = parse_args()
+    # Migration: --dmg-name was the original flag; --artifact-name is the
+    # forward-looking name (we now ship a .zip to Sparkle, not a .dmg).
+    if not args.artifact_name and args.dmg_name:
+        args.artifact_name = args.dmg_name
+    if not args.artifact_name:
+        print("error: must pass --artifact-name (or legacy --dmg-name)", file=sys.stderr)
+        return 1
     tree = load_or_init(args.appcast_in)
     channel = tree.getroot().find("channel")
     if channel is None:
