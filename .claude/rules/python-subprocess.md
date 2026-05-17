@@ -14,6 +14,31 @@ Python ML libraries (torch, speechbrain, pyannote) emit copious warnings and pro
 2. Read stderr for diagnostics/error messages
 3. Log stderr content for debugging but never try to parse it as data
 
+## Pipe Drain Ordering (Deadlock Prevention)
+**Always drain stdout and stderr pipes BEFORE calling `process.waitUntilExit()`.** On macOS (and POSIX generally), pipe buffers are ~64 KB. If a subprocess fills a pipe buffer before the parent reads from it, the subprocess blocks on `write()`. If the parent is blocked on `waitUntilExit()`, neither side can make progress -- classic deadlock.
+
+This is not theoretical: it caused transcription to hang at 100% on files longer than ~25 minutes (PR #15), because pyannote's stderr logging exceeded the buffer on long runs.
+
+**Correct pattern:**
+```swift
+let stdoutRead = Task.detached { stdout.fileHandleForReading.readDataToEndOfFile() }
+let stderrRead = Task.detached { stderr.fileHandleForReading.readDataToEndOfFile() }
+
+process.waitUntilExit()
+
+let stdoutData = await stdoutRead.value
+let stderrData = await stderrRead.value
+```
+
+**Why `Task.detached` instead of `DispatchGroup`:** In Swift 6 strict concurrency, calling `DispatchGroup.wait()` inside an async context triggers a warning (blocking a cooperative thread). `Task.detached` with `await` is the idiomatic async-safe alternative.
+
+**Wrong pattern (will deadlock on large output):**
+```swift
+process.waitUntilExit()
+let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()  // too late
+let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
+```
+
 ## Known Compatibility Patches
 These monkey-patches are required as of pyannote.audio 3.x + PyTorch >= 2.6 + speechbrain:
 

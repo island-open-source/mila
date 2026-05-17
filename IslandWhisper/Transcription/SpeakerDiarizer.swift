@@ -55,11 +55,19 @@ enum SpeakerDiarizer {
             process.standardError = stderr
 
             try process.run()
+
+            // Drain both pipes in detached tasks to avoid deadlock.
+            // macOS pipe buffers are ~64 KB — if the subprocess
+            // fills stderr before we read it, it blocks on write()
+            // while we block on waitUntilExit().
+            let stdoutRead = Task.detached { stdout.fileHandleForReading.readDataToEndOfFile() }
+            let stderrRead = Task.detached { stderr.fileHandleForReading.readDataToEndOfFile() }
+
             process.waitUntilExit()
 
             return PythonResult(
-                stdout: stdout.fileHandleForReading.readDataToEndOfFile(),
-                stderr: stderr.fileHandleForReading.readDataToEndOfFile(),
+                stdout: await stdoutRead.value,
+                stderr: await stderrRead.value,
                 exitCode: process.terminationStatus
             )
         }.value
