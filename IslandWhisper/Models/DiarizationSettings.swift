@@ -261,31 +261,57 @@ final class DiarizationSettings: ObservableObject {
         // so a genuinely-broken state can't pip-loop forever.
         if hasBundledRuntime, isEnabled {
             var installed: Set<String> = []
-            for _ in 0..<8 {
+            var lastCode: String? = nil
+            var nuclearAttempted = false
+            iteration: for _ in 0..<10 {
                 let result = await runHealthCheckOnce()
                 if result.ok { healthCheckResult = result; return }
-                guard result.code == "missing_module",
-                      let module = result.module,
-                      !installed.contains(module) else { break }
-                isInstalling = true
-                installed.insert(module)
-                do {
-                    _ = try await SpeakerDiarizer.installMissingModule(
-                        pythonPath: pythonPath,
-                        userSitePackages: DiarizationBootstrap.userSitePackages.path,
-                        module: module
-                    )
-                } catch {
-                    healthCheckResult = SpeakerDiarizer.HealthCheckResult(
-                        ok: false,
-                        error: "Auto-install of \(module) failed: \(error.localizedDescription)",
-                        code: result.code,
-                        module: module
-                    )
+
+                switch result.code {
+                case "missing_module":
+                    guard let module = result.module,
+                          !installed.contains(module) else { break iteration }
+                    isInstalling = true
+                    installed.insert(module)
+                    do {
+                        _ = try await SpeakerDiarizer.installMissingModule(
+                            pythonPath: pythonPath,
+                            userSitePackages: DiarizationBootstrap.userSitePackages.path,
+                            module: module
+                        )
+                    } catch {
+                        healthCheckResult = SpeakerDiarizer.HealthCheckResult(
+                            ok: false,
+                            error: "Auto-install of \(module) failed: \(error.localizedDescription)",
+                            code: result.code,
+                            module: module
+                        )
+                        isInstalling = false
+                        return
+                    }
                     isInstalling = false
-                    return
+                    lastCode = result.code
+                default:
+                    // Non-recoverable error code (e.g. "unknown" — common
+                    // when pyannote internally swallows a ModuleNotFoundError
+                    // and re-raises an ambiguous "partially initialized
+                    // module" ImportError). Wipe the user dir and re-run
+                    // bootstrap once. This is the "reset everything if it's
+                    // in a messed up state" path — we only take it once per
+                    // call to avoid infinite loops on a genuinely broken
+                    // environment.
+                    if nuclearAttempted {
+                        healthCheckResult = result
+                        return
+                    }
+                    nuclearAttempted = true
+                    isInstalling = true
+                    await bootstrap.nuclearRepair()
+                    isInstalling = false
+                    installed.removeAll()
+                    lastCode = result.code
                 }
-                isInstalling = false
+                _ = lastCode  // suppress unused-variable warning
             }
         }
 

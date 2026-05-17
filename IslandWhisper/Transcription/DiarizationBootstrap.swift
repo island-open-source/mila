@@ -44,8 +44,26 @@ final class DiarizationBootstrap: ObservableObject {
     /// consume it at runtime — first call raises
     /// `RuntimeError: Numpy is not available`. Installing numpy 1.26.x
     /// into the user dir works because PYTHONPATH puts user FIRST.
+    ///
+    /// `matplotlib` + chain: pyannote's audiomentations + pyannote-metrics
+    /// lazily import matplotlib deep inside `Pipeline.from_pretrained`. If
+    /// matplotlib (or one of its own deps: Pillow / pyparsing / cycler /
+    /// kiwisolver / fonttools) is missing, pyannote sometimes swallows the
+    /// real ModuleNotFoundError and re-raises an ambiguous "cannot import
+    /// name '_c_internal_utils' from partially initialized module
+    /// 'matplotlib'" — which is NOT a ModuleNotFoundError, so the runtime
+    /// self-heal can't determine which module to fetch. Pre-installing
+    /// the whole chain up front sidesteps that failure path entirely.
+    /// (The runtime self-heal still handles any *other* transitive dep
+    /// that may surface later.)
     static let extraInstallSpecs: [String] = [
         "numpy<2",
+        "matplotlib",
+        "Pillow",
+        "pyparsing",
+        "cycler",
+        "kiwisolver",
+        "fonttools",
     ]
 
     enum Stage: Equatable {
@@ -197,6 +215,13 @@ final class DiarizationBootstrap: ObservableObject {
         isReady = false
         stage = .notStarted
         await bootstrapIfNeeded()
+    }
+
+    /// Wipe + re-bootstrap. Same as `reinstall()`. Exposed as a separate
+    /// name so the iterative self-heal can request it without the UI
+    /// affordance ("Reinstall" button) reading semantically odd.
+    func nuclearRepair() async {
+        await reinstall()
     }
 
     // MARK: - Internals

@@ -534,11 +534,14 @@ private struct DiarizationSettingsTabContent: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             Toggle("Enable speaker diarization", isOn: $diarization.isEnabled)
+                .accessibilityIdentifier("speakers.enable.toggle")
 
             if showingBootstrapCard {
                 bootstrapCard
+                    .accessibilityIdentifier("speakers.bootstrap.card")
             } else {
                 healthCard
+                    .accessibilityIdentifier("speakers.health.card")
             }
 
             if let error = diarization.healthCheckResult?.error,
@@ -555,6 +558,15 @@ private struct DiarizationSettingsTabContent: View {
                 .padding(8)
                 .background(.red.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
             }
+
+            // Stable accessibility probe for XCUITest — reads "ok" iff
+            // the health-check result is ok. Zero-size, not visible to
+            // humans. Lets the automated GUI test wait deterministically
+            // for "Speakers self-heals to green" without scraping labels.
+            Color.clear
+                .frame(width: 0, height: 0)
+                .accessibilityIdentifier("speakers.health.ok.probe")
+                .accessibilityLabel(diarization.healthCheckResult?.ok == true ? "ok" : "not_ok")
 
             Spacer()
         }
