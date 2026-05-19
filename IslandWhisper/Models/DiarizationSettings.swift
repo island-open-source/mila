@@ -18,13 +18,15 @@ final class DiarizationSettings: ObservableObject {
     /// Orchestrates the bundled-python + runtime-torch-install flow. The
     /// instance is alive for the lifetime of DiarizationSettings so the
     /// Settings UI can observe its `stage` directly via .environmentObject.
-    let bootstrap = DiarizationBootstrap()
+    let bootstrap: DiarizationBootstrap
 
     /// True iff the .app shipped with a bundled PythonRuntime — when true
     /// we run the bundled-python flow exclusively (no pip-install onto
     /// system python), otherwise we fall back to the legacy auto-recover.
+    /// Reads from the injected bootstrap so tests that swap the bootstrap's
+    /// paths see a consistent gate.
     var hasBundledRuntime: Bool {
-        DiarizationBootstrap.bundledPythonPath != nil
+        bootstrap.hasBundledPython
     }
     @Published var pythonPath: String {
         didSet {
@@ -37,13 +39,28 @@ final class DiarizationSettings: ObservableObject {
     private let defaults: UserDefaults
     @Published private(set) var pythonFound: Bool
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard,
+         bootstrap: DiarizationBootstrap? = nil) {
         self.defaults = defaults
+        // Build the default bootstrap inside the init rather than via a
+        // default-argument expression — `DiarizationBootstrap.init` is
+        // `@MainActor`-isolated, and Swift evaluates default arguments in
+        // the caller's isolation context, which made the previous default
+        // unusable from non-isolated entry points.
+        self.bootstrap = bootstrap ?? DiarizationBootstrap()
         self.isEnabled = defaults.bool(forKey: "diarization.enabled")
         let path = defaults.string(forKey: "diarization.pythonPath") ?? "/usr/bin/python3"
         self.pythonPath = path
         self._pythonFound = Published(initialValue: FileManager.default.fileExists(atPath: path))
         restoreVerifiedState()
+        // didSet on `isEnabled` doesn't fire from `init`, so when the user
+        // had previously enabled diarization AND torch is already installed
+        // in the user-writable site-packages, `bootstrap.isReady` would
+        // stay at its default `false`. That made `isConfigured` silently
+        // return false on the first transcription after launch — the
+        // recording would complete with no speaker labels. Run the cheap
+        // file-existence check here so the gate matches reality at startup.
+        self.bootstrap.refreshReadyState()
         if isEnabled && pythonFound && verificationStatus != .verified {
             Task { await checkDeps() }
         }

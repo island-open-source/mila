@@ -84,6 +84,28 @@ final class DiarizationBootstrap: ObservableObject {
 
     private let fileManager = FileManager.default
 
+    /// Effective bundled-python path for this instance. Production callers
+    /// get the static `bundledPythonPath`; tests can inject a fixture path.
+    private let bundledPython: String?
+    /// Effective user-writable site-packages dir for this instance.
+    /// Production callers get the static `userSitePackages`; tests can
+    /// inject a temp dir so the file-existence checks in
+    /// `refreshReadyState()` operate against controlled fixtures.
+    private let sitePackagesURL: URL
+
+    /// True iff this instance was constructed against a bundled Python
+    /// runtime. Mirrors `bundledPython != nil` but is the right hook for
+    /// `DiarizationSettings.hasBundledRuntime` to consult — that way the
+    /// gate sees the same value the instance was initialised with, which
+    /// matters when a test injects a fake path.
+    var hasBundledPython: Bool { bundledPython != nil }
+
+    init(bundledPython: String? = nil,
+         sitePackages: URL? = nil) {
+        self.bundledPython = bundledPython ?? Self.bundledPythonPath
+        self.sitePackagesURL = sitePackages ?? Self.userSitePackages
+    }
+
     /// Bundled PythonRuntime location inside the .app. Nil if the app was
     /// built without a bundle (e.g. a dev build before `make
     /// bundle-diarization` has run) — callers can fall back to system
@@ -144,13 +166,13 @@ final class DiarizationBootstrap: ObservableObject {
     /// corrupted install will fail at the next subprocess run and the
     /// user can hit "Reinstall" to redo this flow.
     func refreshReadyState() {
-        let torchInit = Self.userSitePackages
+        let torchInit = sitePackagesURL
             .appendingPathComponent("torch")
             .appendingPathComponent("__init__.py")
-        let torchaudioInit = Self.userSitePackages
+        let torchaudioInit = sitePackagesURL
             .appendingPathComponent("torchaudio")
             .appendingPathComponent("__init__.py")
-        isReady = Self.bundledPythonPath != nil
+        isReady = bundledPython != nil
             && fileManager.fileExists(atPath: torchInit.path)
             && fileManager.fileExists(atPath: torchaudioInit.path)
         if isReady, stage == .notStarted { stage = .ready }
@@ -162,13 +184,13 @@ final class DiarizationBootstrap: ObservableObject {
         refreshReadyState()
         if isReady { return }
 
-        guard let python = Self.bundledPythonPath else {
+        guard let python = bundledPython else {
             stage = .failed("Bundled PythonRuntime missing from .app — run `make bundle-diarization` and rebuild.")
             return
         }
 
         do {
-            try fileManager.createDirectory(at: Self.userSitePackages,
+            try fileManager.createDirectory(at: sitePackagesURL,
                                             withIntermediateDirectories: true)
 
             // Download all wheels first so the progress bar reflects total
@@ -211,7 +233,7 @@ final class DiarizationBootstrap: ObservableObject {
     /// Resets the user-writable site-packages and re-runs bootstrap. For
     /// the manual "Reinstall" button in Settings.
     func reinstall() async {
-        try? fileManager.removeItem(at: Self.userSitePackages)
+        try? fileManager.removeItem(at: sitePackagesURL)
         isReady = false
         stage = .notStarted
         await bootstrapIfNeeded()
@@ -250,7 +272,7 @@ final class DiarizationBootstrap: ObservableObject {
     /// install path — we don't want pip pulling in adjacent packages we
     /// haven't planned for.
     private func runPipInstallSpec(python: String, spec: String) async throws {
-        let targetPath = Self.userSitePackages.path
+        let targetPath = sitePackagesURL.path
         try await Task.detached(priority: .userInitiated) {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: python)
@@ -279,7 +301,7 @@ final class DiarizationBootstrap: ObservableObject {
     }
 
     private func runPipInstall(python: String, wheels: [URL]) async throws {
-        let targetPath = Self.userSitePackages.path
+        let targetPath = sitePackagesURL.path
         let wheelPaths = wheels.map(\.path)
         // Detach the blocking subprocess work to a background task —
         // pip-installing torch (~60 MB wheel, ~600 MB on-disk) can run for
@@ -319,7 +341,7 @@ final class DiarizationBootstrap: ObservableObject {
         // Sign both torch/ and torchaudio/ — torch ships most of the
         // dylibs (~90 MB) but torchaudio has a handful of its own.
         let candidates = ["torch", "torchaudio"]
-            .map { Self.userSitePackages.appendingPathComponent($0).path }
+            .map { sitePackagesURL.appendingPathComponent($0).path }
             .filter { fileManager.fileExists(atPath: $0) }
         guard !candidates.isEmpty else { return }
         let pathList = candidates.map { $0.shellEscaped }.joined(separator: " ")
