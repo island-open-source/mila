@@ -239,8 +239,10 @@ struct RecordingDetailView: View {
     }
 
     private func copyTranscript() {
+        let text = TranscriptFormatter.plainText(segments: recording.segments,
+                                                 fallback: recording.fullText)
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(recording.fullText, forType: .string)
+        NSPasteboard.general.setString(text, forType: .string)
     }
 }
 

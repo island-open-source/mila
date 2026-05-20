@@ -30,7 +30,15 @@ struct RenameRecordingSheet: View {
         store.recordings.first(where: { $0.id == initialRecording.id }) ?? initialRecording
     }
 
-    private var transcript: String { liveRecording.fullText }
+    /// Speaker-aware view of the transcript. When diarization produced
+    /// labels, each turn comes through as `SPEAKER_XX: …` so the LLM (or
+    /// any other consumer of this property) sees who said what, not just
+    /// a wall of concatenated text. Falls back to the plain `fullText`
+    /// join when no segments carry speaker info.
+    private var transcript: String {
+        TranscriptFormatter.plainText(segments: liveRecording.segments,
+                                      fallback: liveRecording.fullText)
+    }
     private var transcriptReady: Bool {
         !transcript.isEmpty && liveRecording.status != .running && liveRecording.status != .pending
     }
