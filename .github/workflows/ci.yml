@@ -80,6 +80,10 @@ jobs:
             build | xcpretty || true
 
       - name: Run unit tests
+        # Scope to MilaTests only. UI tests can't reliably foreground on
+        # hosted runners (see ios-tests.yml for the full explanation);
+        # gating CI on them would mean a permanently red status, which
+        # is worse than no UI-test signal at all.
         run: |
           set -o pipefail
           xcodebuild \
@@ -88,4 +92,5 @@ jobs:
             -configuration Debug \
             -derivedDataPath build \
             -destination 'platform=macOS' \
+            -only-testing:MilaTests \
             test
