@@ -333,16 +333,48 @@ final class MilaAppDelegate: NSObject, NSApplicationDelegate {
             // too — it only works on the deprecated "textured" window
             // style and throws NSInvalidArgumentException on regular
             // windows. Don't add it back.)
-            //
-            // Also tried walking the contentView hierarchy and zeroing
-            // cornerRadius on any layer-backed view to revert macOS
-            // Tahoe's "floating sidebar card" look (rounded all four
-            // corners, margin around the sidebar) to the classic
-            // flush-with-window-edges sidebar. The walk was way too
-            // broad — it also zeroed the search field, button shapes,
-            // and the window's own corner mask, breaking the entire
-            // layout. Reverting until we find a targeted enough way to
-            // identify ONLY the sidebar's background container.
+
+            // Freeze the sidebar's vibrant material so it stops
+            // shifting color when the user drags the window across
+            // other apps. Cross-app color sampling is what
+            // NSVisualEffectView with `.behindWindow` blending mode
+            // does — switching the sidebar's effect views to
+            // `.withinWindow` makes them sample only Mila's own
+            // content, which is uniform, so the card stays a stable
+            // gray. The card's shape (rounded corners, floating
+            // inset) is untouched.
+            if let contentView = window.contentView {
+                self.freezeSidebarMaterials(in: contentView)
+            }
+        }
+    }
+
+    /// Locate the NSSplitView under `view` and switch every
+    /// NSVisualEffectView in its sidebar pane to `.withinWindow`
+    /// blending. Restricting the walk to the sidebar pane (the first
+    /// arranged subview of the split view) is what makes this safe to
+    /// run repeatedly — we don't touch the detail pane's chrome.
+    private func freezeSidebarMaterials(in view: NSView) {
+        if let split = view as? NSSplitView,
+           let sidebar = split.arrangedSubviews.first {
+            applyWithinWindowBlending(to: sidebar)
+            return
+        }
+        for sub in view.subviews {
+            freezeSidebarMaterials(in: sub)
+        }
+    }
+
+    private func applyWithinWindowBlending(to view: NSView) {
+        if let effect = view as? NSVisualEffectView {
+            // `.withinWindow` blends with content layered behind this
+            // view inside the same window, not whatever's behind the
+            // window itself. The visual on top of the material — text,
+            // icons, selection highlights — is unaffected.
+            effect.blendingMode = .withinWindow
+        }
+        for sub in view.subviews {
+            applyWithinWindowBlending(to: sub)
         }
     }
 
