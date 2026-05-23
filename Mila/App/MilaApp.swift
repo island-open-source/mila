@@ -103,6 +103,7 @@ struct MilaApp: App {
                 .task { ensureDefaultModelsInstalled() }
                 .task { await diarizationSettings.runHealthCheck() }
                 .onAppear { wireDelegate() }
+                .task { maybeRelocateBundle() }
         }
         .commands {
             CommandGroup(after: .appInfo) {
@@ -166,6 +167,19 @@ struct MilaApp: App {
         } catch {
             transcription.lastError = "Could not build diagnostic report: \(error.localizedDescription)"
         }
+    }
+
+    /// One-time per launch: if the bundle is installed at the legacy
+    /// IslandWhisper.app path, offer the user a rename-and-relaunch.
+    /// See `BundleRelocator` for the why + safety constraints (only
+    /// runs against /Applications or ~/Applications, never overwrites
+    /// an existing Mila.app at the destination, persists a skip flag
+    /// if the user declines).
+    private static var didCheckBundleRename = false
+    private func maybeRelocateBundle() {
+        guard !Self.didCheckBundleRename else { return }
+        Self.didCheckBundleRename = true
+        BundleRelocator.relocateIfNeeded()
     }
 
     private func wireDelegate() {
@@ -269,6 +283,67 @@ final class MilaAppDelegate: NSObject, NSApplicationDelegate {
             name: NSNotification.Name("com.apple.screenIsLocked"),
             object: nil
         )
+
+        // Kill the inconsistent toolbar separator (a thin hairline that
+        // appears under the toolbar in the detail pane but not in the
+        // sidebar, looks broken). NavigationSplitView re-applies the
+        // toolbar configuration on every layout pass, so a single set
+        // via NSViewRepresentable doesn't stick — we have to reapply
+        // whenever a window becomes key.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(stripToolbarSeparator(_:)),
+            name: NSWindow.didBecomeKeyNotification,
+            object: nil
+        )
+        // Apply once now in case the main window is already key by the
+        // time observers are installed.
+        for window in NSApp.windows {
+            applyChrome(to: window)
+        }
+    }
+
+    @objc private func stripToolbarSeparator(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        applyChrome(to: window)
+    }
+
+    /// Apply Mila's window chrome tweaks to a single NSWindow. Strips
+    /// the hairline separator that renders below the toolbar in the
+    /// detail pane but stops at the sidebar splitter — looks like a
+    /// broken half-divider.
+    ///
+    /// Both `titlebarSeparatorStyle` (the modern, macOS 11+ property)
+    /// and the deprecated `NSToolbar.showsBaselineSeparator` are zeroed
+    /// out because they govern different layers — depending on the
+    /// macOS version + SwiftUI version, either or both can produce the
+    /// line. Setting both is harmless and covers everything.
+    private func applyChrome(to window: NSWindow) {
+        if let id = window.identifier?.rawValue,
+           id.contains("settings") || id.contains("alert") {
+            return
+        }
+        // Belt and suspenders: queue the property change behind any
+        // SwiftUI layout passes that might be re-applying the default
+        // separator style.
+        DispatchQueue.main.async {
+            window.titlebarSeparatorStyle = .none
+            window.toolbar?.showsBaselineSeparator = false
+            // (Tried `setAutorecalculatesContentBorderThickness` here
+            // too — it only works on the deprecated "textured" window
+            // style and throws NSInvalidArgumentException on regular
+            // windows. Don't add it back.)
+            //
+            // Also tried walking the contentView hierarchy and zeroing
+            // cornerRadius on any layer-backed view to revert macOS
+            // Tahoe's "floating sidebar card" look (rounded all four
+            // corners, margin around the sidebar) to the classic
+            // flush-with-window-edges sidebar. The walk was way too
+            // broad — it also zeroed the search field, button shapes,
+            // and the window's own corner mask, breaking the entire
+            // layout. Reverting until we find a targeted enough way to
+            // identify ONLY the sidebar's background container.
+        }
     }
 
     @objc private func handleScreenSleep(_ notification: Notification) {

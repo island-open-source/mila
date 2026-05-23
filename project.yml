@@ -17,14 +17,14 @@ settings:
     SWIFT_STRICT_CONCURRENCY: minimal
     GENERATE_INFOPLIST_FILE: NO
     PRODUCT_BUNDLE_IDENTIFIER: io.island.whisper.IslandWhisper
-    MARKETING_VERSION: "1.4.0"
-    # Build 24 (v1.4.0 with the io.island.mila.Mila bundle ID) failed
-    # auto-update from existing IslandWhisper installs because Sparkle
-    # rejects cross-bundle-ID updates ("improperly signed and could not
-    # be validated"). Reverting the bundle ID back to
-    # io.island.whisper.IslandWhisper; bumping the build so Sparkle
-    # sees a newer entry and re-attempts past its cached failure.
-    CURRENT_PROJECT_VERSION: "25"
+    MARKETING_VERSION: "1.4.1"
+    # 1.4.1 adds the in-app BundleRelocator that completes the
+    # IslandWhisper → Mila rename for installs that auto-updated via
+    # Sparkle (which keeps the original /Applications/IslandWhisper.app
+    # path even though the bundle's contents are now Mila). Build 26
+    # so Sparkle sees a newer entry than the v1.4.0 build 25 it just
+    # finished applying.
+    CURRENT_PROJECT_VERSION: "26"
 
 packages:
   TranscriptionCore:

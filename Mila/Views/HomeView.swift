@@ -126,10 +126,11 @@ struct HomeView: View {
     }
 }
 
-/// Big primary "Record" CTA. Idle state uses the system accent; the
-/// active state flips to red with a pulsing ring so it's obvious at a
-/// glance whether you're recording. Includes a small badge in the
-/// caption line indicating whether app audio is part of this capture.
+/// Big primary "Record" CTA. Idle state is a quiet gray surface so the
+/// page isn't shouting at the user when nothing's happening. The
+/// recording state flips to the system accent (blue) with a pulsing
+/// ring and a literal red square stop indicator inside the icon
+/// circle — once you're recording you want it loud and unmissable.
 private struct HeroRecordButton: View {
     let isRecording: Bool
     let languageFlag: String
@@ -145,7 +146,7 @@ private struct HeroRecordButton: View {
             HStack(spacing: 16) {
                 ZStack {
                     Circle()
-                        .fill(.white.opacity(0.18))
+                        .fill(iconCircleFill)
                         .frame(width: 56, height: 56)
                     if isRecording {
                         Circle()
@@ -153,21 +154,27 @@ private struct HeroRecordButton: View {
                             .frame(width: 56, height: 56)
                             .scaleEffect(pulse ? 1.6 : 1.0)
                             .opacity(pulse ? 0 : 0.9)
+                        // Explicit red square as the stop indicator. The
+                        // SF Symbol `stop.fill` was an option but a
+                        // literal red square reads more like "press to
+                        // stop this recording" at a glance.
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(Color.red)
+                            .frame(width: 24, height: 24)
+                    } else {
+                        Image(systemName: "mic.fill")
+                            .font(.system(size: 22, weight: .bold))
+                            .foregroundStyle(.primary.opacity(0.85))
                     }
-                    Image(systemName: isRecording ? "stop.fill" : "mic.fill")
-                        .font(.system(size: 22, weight: .bold))
-                        .foregroundStyle(.white)
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(isRecording ? "Recording…" : "Record")
                         .font(.title2.weight(.semibold))
-                        .foregroundStyle(.white)
-                    HStack(spacing: 6) {
-                        Text(captionText)
-                            .font(.callout)
-                            .foregroundStyle(.white.opacity(0.9))
-                    }
+                        .foregroundStyle(textColor)
+                    Text(captionText)
+                        .font(.callout)
+                        .foregroundStyle(captionColor)
                 }
 
                 Spacer(minLength: 0)
@@ -185,7 +192,7 @@ private struct HeroRecordButton: View {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(Color.white.opacity(hovering ? 0.25 : 0.12), lineWidth: 1)
+                    .strokeBorder(strokeColor, lineWidth: 1)
             )
             .shadow(color: shadowColor, radius: hovering ? 14 : 8, y: 4)
         }
@@ -194,6 +201,29 @@ private struct HeroRecordButton: View {
         .onHover { hovering = $0 }
         .onAppear { startPulseIfNeeded() }
         .onChange(of: isRecording) { _, _ in startPulseIfNeeded() }
+    }
+
+    /// Inner icon circle fill — slightly transparent white on the blue
+    /// recording state (so it reads as a translucent bezel around the
+    /// stop square), darker neutral on the gray idle state so the mic
+    /// glyph still has contrast against it.
+    private var iconCircleFill: Color {
+        isRecording ? Color.white.opacity(0.22) : Color.primary.opacity(0.08)
+    }
+
+    private var textColor: Color {
+        isRecording ? .white : .primary
+    }
+
+    private var captionColor: Color {
+        isRecording ? Color.white.opacity(0.9) : .secondary
+    }
+
+    private var strokeColor: Color {
+        if isRecording {
+            return Color.white.opacity(hovering ? 0.25 : 0.12)
+        }
+        return Color.primary.opacity(hovering ? 0.18 : 0.10)
     }
 
     private var captionText: String {
@@ -205,15 +235,23 @@ private struct HeroRecordButton: View {
 
     private var backgroundColors: [Color] {
         if isRecording {
-            return [Color(red: 0.93, green: 0.27, blue: 0.27),
-                    Color(red: 0.78, green: 0.18, blue: 0.18)]
+            // Loud accent-blue gradient while recording — same look the
+            // old "idle" state used to have. It's visible from across
+            // the room so you never forget the mic is hot.
+            return [Color.accentColor,
+                    Color.accentColor.opacity(0.78)]
         }
-        return [Color.accentColor,
-                Color.accentColor.opacity(0.78)]
+        // Quiet gray gradient when idle. NSColor.controlColor adapts
+        // to light / dark mode automatically, and the slight gradient
+        // gives the button a little depth without screaming "primary
+        // CTA" — Record is the only button on Home, the visual weight
+        // doesn't need to fight for attention.
+        let base = Color(NSColor.controlColor)
+        return [base.opacity(0.95), base.opacity(0.7)]
     }
 
     private var shadowColor: Color {
-        isRecording ? Color.red.opacity(0.35) : Color.accentColor.opacity(0.35)
+        isRecording ? Color.accentColor.opacity(0.35) : Color.black.opacity(0.10)
     }
 
     private func startPulseIfNeeded() {

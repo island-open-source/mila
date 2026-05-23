@@ -107,6 +107,15 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        // Opaque background so the sidebar's NSVisualEffectView
+        // material (the macOS Tahoe vibrant "sidebar" backdrop) doesn't
+        // pick up whatever's behind the window. Without this the
+        // sidebar shifts color as you drag the window across other
+        // apps — distracting, no useful signal. `scrollContentBackground
+        // (.hidden)` is needed first so the List doesn't paint its
+        // own opaque layer on top of ours.
+        .scrollContentBackground(.hidden)
+        .background(Color(NSColor.controlBackgroundColor))
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 Divider()
@@ -115,7 +124,9 @@ struct SidebarView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
             }
-            .background(.bar)
+            // Match the main sidebar's opaque fill so the footer
+            // doesn't go translucent again.
+            .background(Color(NSColor.controlBackgroundColor))
         }
         .sheet(isPresented: $showingNewFolderSheet) {
             FolderNameSheet(
