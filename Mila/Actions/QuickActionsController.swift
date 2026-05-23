@@ -28,6 +28,13 @@ final class QuickActionsController: ObservableObject {
     /// my transcript empty?" failure (muted mic, wrong device, etc.). The
     /// alert in ContentView shows once and resets when the user dismisses.
     @Published var noSoundWarningShown = false
+    /// Set when microphone permission is missing — separately surfaced
+    /// from `transcription.lastError` so we can show an actionable
+    /// "Open Privacy Settings" alert (mirrors the screen-recording one).
+    /// The most common time this trips: the bundle ID changed (e.g.
+    /// IslandWhisper → Mila rename), so macOS treats this as a brand
+    /// new app and the user has to re-grant access.
+    @Published var microphonePermissionMissing = false
 
     /// Silence-watch tunables — exposed on the type so tests can override
     /// (we don't want the test suite to sleep for 10 seconds).
@@ -71,6 +78,11 @@ final class QuickActionsController: ObservableObject {
     }
 
     private func startVoiceMemo() async {
+        // Pre-flight the mic auth check — if denied we want to point the
+        // user at System Settings (like we do for screen recording),
+        // not surface a vague "operation couldn't be completed" error
+        // from deep inside AVAudioEngine.
+        guard await ensureMicrophonePermission() else { return }
         let url = store.freshAudioURL(suggestedName: "Voice Memo")
         do {
             try await session.start(source: .microphone, outputURL: url)
@@ -78,6 +90,40 @@ final class QuickActionsController: ObservableObject {
             startSilenceWatch(watching: .microphone)
         } catch {
             transcription.lastError = "Could not start voice memo: \(error.localizedDescription)"
+        }
+    }
+
+    /// Returns true iff microphone access is granted (or was just granted
+    /// by the user via the system prompt). Returns false and trips
+    /// `microphonePermissionMissing` if denied / restricted — caller
+    /// should bail. Idempotent: calling this when already authorized is
+    /// a cheap no-op.
+    private func ensureMicrophonePermission() async -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            return true
+        case .notDetermined:
+            // First launch (or first launch on this bundle ID after a
+            // rename). Trigger the OS prompt; the result determines
+            // whether the recording proceeds.
+            let granted = await AVCaptureDevice.requestAccess(for: .audio)
+            if !granted { microphonePermissionMissing = true }
+            return granted
+        case .denied, .restricted:
+            microphonePermissionMissing = true
+            return false
+        @unknown default:
+            microphonePermissionMissing = true
+            return false
+        }
+    }
+
+    /// Open System Settings → Privacy & Security → Microphone. Used by
+    /// the in-app permission alert so the user can grant access in one
+    /// click instead of hunting through Settings.
+    func openMicrophoneSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+            NSWorkspace.shared.open(url)
         }
     }
 
@@ -91,6 +137,12 @@ final class QuickActionsController: ObservableObject {
 
     func startAppRecording(app: SCRunningApplication?, includeMic: Bool) async {
         isAppPickerShown = false
+        // When the user opted into capturing their mic alongside system
+        // audio, pre-flight the mic auth check too — otherwise the same
+        // vague-error-after-rename trap as Voice Memo.
+        if includeMic, !(await ensureMicrophonePermission()) {
+            return
+        }
         session.selectApp(app)
         let titleBase = app?.applicationName ?? "System Audio"
         let url = store.freshAudioURL(suggestedName: titleBase)

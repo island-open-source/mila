@@ -34,20 +34,23 @@ final class OrganizationUITests: XCTestCase {
         item.click()
     }
 
-    func test_seed_recording_visible_in_transcriptions_list() {
+    func test_seed_recording_visible_in_default_folder() {
+        // The Transcriptions / Meetings / Dictations history categories
+        // were collapsed into a single "Default" virtual folder; the
+        // seeded recording (folder == nil) now lives there.
         let app = launchApp()
-        tapSidebarCategory(app, "sidebar.category.transcriptions")
+        tapSidebarCategory(app, "sidebar.folder.default")
 
         let row = app.descendants(matching: .any)
             .matching(identifier: "history.row.Seed Recording")
             .firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: 5),
-                      "Seeded recording not visible in Transcriptions")
+                      "Seeded recording not visible in Default folder")
     }
 
     func test_rename_recording_via_detail_inline_edit() {
         let app = launchApp()
-        tapSidebarCategory(app, "sidebar.category.transcriptions")
+        tapSidebarCategory(app, "sidebar.folder.default")
 
         let row = app.descendants(matching: .any)
             .matching(identifier: "history.row.Seed Recording")
@@ -70,8 +73,8 @@ final class OrganizationUITests: XCTestCase {
         titleField.typeKey("a", modifierFlags: .command)
         titleField.typeText("Renamed by UI Test\r")
 
-        // Title in the sidebar list now reflects the new name.
-        tapSidebarCategory(app, "sidebar.category.transcriptions")
+        // Title in the Default folder list now reflects the new name.
+        tapSidebarCategory(app, "sidebar.folder.default")
         let renamedRow = app.descendants(matching: .any)
             .matching(identifier: "history.row.Renamed by UI Test")
             .firstMatch

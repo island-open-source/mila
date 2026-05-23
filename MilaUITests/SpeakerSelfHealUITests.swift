@@ -43,6 +43,18 @@ final class SpeakerSelfHealUITests: XCTestCase {
     }
 
     func test_self_heal_converges_to_ok_from_clean_state() throws {
+        // The test downloads ~60 MB of torch wheels and waits up to 8
+        // minutes for the diarization pipeline to converge. GitHub-hosted
+        // runners are too flaky for that — network rate-limits, pip
+        // cache stalls, and slow CPU all push it past the budget. We
+        // still run it locally where a developer can wait out a real
+        // pipeline failure.
+        try XCTSkipIf(
+            ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] == "true"
+                || ProcessInfo.processInfo.environment["CI"] == "true",
+            "Skipping speakers self-heal e2e on CI — too slow + network-bound. Runs locally."
+        )
+
         let app = XCUIApplication()
         app.launchArguments = ["--ui-test-clean-store"]
         app.launch()

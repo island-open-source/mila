@@ -59,19 +59,35 @@ struct ContentView: View {
             message: { Text(transcription.lastError ?? "") }
         )
         .alert(
-            "No sound detected",
+            "Microphone isn't picking up sound",
             isPresented: $actions.noSoundWarningShown,
             actions: {
                 Button("Keep recording") {
                     actions.noSoundWarningShown = false
                 }
-                Button("Stop recording", role: .destructive) {
+                Button("Stop") {
                     actions.noSoundWarningShown = false
                     Task { await actions.stopRecording() }
                 }
             },
             message: {
-                Text("Mila hasn't heard any audio in the last 10 seconds. Check that the right microphone is selected (in the toolbar or Settings → Audio) and that it isn't muted.")
+                Text("Mila hasn't heard any audio in the last 10 seconds. This is fine if you're recording a quiet section — otherwise check the input device in the toolbar or in Settings → Audio.")
+            }
+        )
+        .alert(
+            "Microphone access needed",
+            isPresented: $actions.microphonePermissionMissing,
+            actions: {
+                Button("Open Privacy Settings") {
+                    actions.openMicrophoneSettings()
+                    actions.microphonePermissionMissing = false
+                }
+                Button("Cancel", role: .cancel) {
+                    actions.microphonePermissionMissing = false
+                }
+            },
+            message: {
+                Text("Mila needs microphone access to record audio. In System Settings → Privacy & Security → Microphone, turn Mila on. If you don't see Mila listed, this is likely because the app was previously named IslandWhisper — quit and relaunch Mila after toggling the switch.")
             }
         )
         .alert(
