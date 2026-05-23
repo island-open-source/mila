@@ -129,6 +129,14 @@ struct MilaApp: App {
                     Task { await dictation.toggle(action: .dictateHebrew) }
                 }
             }
+            // Surface the diagnostic-report action under Help so a user
+            // with a bug to report can hand off a zip without us asking
+            // for ad-hoc Console.app exports or screenshots.
+            CommandGroup(after: .help) {
+                Button("Save Diagnostic Report…") {
+                    Task { await saveDiagnosticReport() }
+                }
+            }
         }
 
         Settings {
@@ -141,6 +149,22 @@ struct MilaApp: App {
                 .environmentObject(actions)
                 .environmentObject(llmSettings)
                 .environmentObject(diarizationSettings)
+        }
+    }
+
+    /// Build a diagnostic zip and let the user pick where to save it.
+    /// Errors surface through the standard transcription.lastError alert
+    /// — there's already plumbing for showing a one-shot error toast,
+    /// no need to invent a new error-presentation path for this menu
+    /// item.
+    private func saveDiagnosticReport() async {
+        do {
+            _ = try await DiagnosticReporter.saveReportInteractively(
+                store: store,
+                diarization: diarizationSettings
+            )
+        } catch {
+            transcription.lastError = "Could not build diagnostic report: \(error.localizedDescription)"
         }
     }
 

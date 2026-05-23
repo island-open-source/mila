@@ -88,7 +88,12 @@ targets:
             UTTypeConformsTo:
               - public.data
             UTTypeTagSpecification: {}
-        SUFeedURL: https://island-mila-updates.internal.island.io/appcast.xml
+        # Sparkle feed URL deliberately keeps the legacy `island-whisper`
+        # subdomain so existing installs continue to receive updates
+        # without us having to stand up new DNS / bucket infrastructure
+        # for the rename. The bundle ID is what binds an install to its
+        # appcast, not the URL hostname.
+        SUFeedURL: https://island-whisper-updates.internal.island.io/appcast.xml
         SUPublicEDKey: iF35blPidKUXIaLr59fJgGGdXtI8AgVNxOx5w+eTieY=
         SUEnableAutomaticChecks: true
         SUScheduledCheckInterval: 86400

@@ -386,10 +386,7 @@ private struct QueueRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            Image(systemName: recording.source.sfSymbol)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.tint)
-                .frame(width: 22, height: 22)
+            RecordingSourceBadge(recording: recording, size: 22)
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack {

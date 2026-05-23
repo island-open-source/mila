@@ -179,22 +179,8 @@ private struct HistoryRow: View {
         }()
 
         HStack(alignment: .top, spacing: 12) {
-            ZStack(alignment: .bottomTrailing) {
-                Image(systemName: recording.source.sfSymbol)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.tint)
-                    .frame(width: 22, height: 22)
-                if recording.isZoomRecording {
-                    Image(systemName: "video.fill")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(2)
-                        .background(Color(red: 0.18, green: 0.55, blue: 0.93),
-                                    in: Circle())
-                        .help("Recorded from Zoom")
-                }
-            }
-            .padding(.top, 2)
+            RecordingSourceBadge(recording: recording, size: 24)
+                .padding(.top, 2)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
@@ -218,7 +204,7 @@ private struct HistoryRow: View {
                 HStack(spacing: 6) {
                     Text(recording.createdAt, format: .dateTime.hour().minute())
                     Text("·")
-                    Text(recording.source.displayName)
+                    Text(recording.isZoomRecording ? "Zoom" : recording.source.displayName)
                     if transcription.activeRecordingID == recording.id {
                         Text("·")
                         ProgressView(value: transcription.progress)

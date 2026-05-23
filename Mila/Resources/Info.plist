@@ -41,7 +41,7 @@
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUFeedURL</key>
-	<string>https://island-mila-updates.internal.island.io/appcast.xml</string>
+	<string>https://island-whisper-updates.internal.island.io/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>iF35blPidKUXIaLr59fJgGGdXtI8AgVNxOx5w+eTieY=</string>
 	<key>SUScheduledCheckInterval</key>

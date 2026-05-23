@@ -37,8 +37,12 @@ struct RecordingDetailView: View {
             VStack(alignment: .leading, spacing: 4) {
                 titleEditor
                 HStack(spacing: 8) {
-                    Label(recording.source.displayName,
-                          systemImage: recording.source.sfSymbol)
+                    HStack(spacing: 6) {
+                        RecordingSourceBadge(recording: recording, size: 18)
+                        Text(recording.isZoomRecording
+                             ? "Zoom"
+                             : recording.source.displayName)
+                    }
                     Text("·")
                     Text(recording.createdAt, format: .dateTime)
                     Text("·")

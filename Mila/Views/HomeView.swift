@@ -15,9 +15,10 @@ struct HomeView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 28) {
+            VStack(spacing: 24) {
                 header
-                tiles
+                heroAction
+                secondaryActions
                 hotkeysCard
                 recent
             }
@@ -27,10 +28,19 @@ struct HomeView: View {
         }
     }
 
+    /// Wordmark + "by Island" tagline. The tagline is small and sits at
+    /// the leading edge of the M so it reads as a credit line, not a
+    /// second title.
     private var header: some View {
         VStack(spacing: 6) {
-            Text("Mila")
-                .font(.system(size: 32, weight: .semibold))
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("by Island")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .textCase(.lowercase)
+                Text("Mila")
+                    .font(.system(size: 32, weight: .semibold))
+            }
             Text("Record, dictate, and transcribe locally on your Mac.")
                 .font(.title3)
                 .foregroundStyle(.secondary)
@@ -38,32 +48,38 @@ struct HomeView: View {
         .padding(.top, 8)
     }
 
-    private var tiles: some View {
-        LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 200, maximum: 240), spacing: 16)],
-            spacing: 16
+    /// Hero action — the single tap that 90% of users come to Home for.
+    /// Designed loud: large rounded rectangle, accent-coloured idle state,
+    /// red pulsing "Recording…" state. Replaces the previous flat row of
+    /// four identical gray tiles, which gave Voice Memo no visual edge
+    /// over importing a file.
+    private var heroAction: some View {
+        HeroRecordButton(
+            isRecording: isRecordingMic,
+            languageFlag: languageSettings.current.flagEmoji,
+            languageName: languageSettings.current.displayName
         ) {
-            HomeTile(
-                icon: "mic.fill",
-                label: isRecordingMic ? "Recording…" : "Voice Memo",
-                isActive: isRecordingMic,
-                badge: languageSettings.current.flagEmoji
-            ) {
-                Task { await actions.toggleVoiceMemo() }
-            }
+            Task { await actions.toggleVoiceMemo() }
+        }
+        .frame(maxWidth: 460)
+    }
 
-            HomeTile(icon: "folder", label: "Open Files") {
+    /// Three lower-priority entry points (file import, app audio capture,
+    /// video → SRT) rendered as compact text-buttons rather than tiles —
+    /// they're a one-tap means to an end, not a destination.
+    private var secondaryActions: some View {
+        HStack(spacing: 10) {
+            SecondaryActionButton(icon: "folder", label: "Open Files") {
                 Task { await actions.openFiles() }
             }
-
-            HomeTile(icon: "speaker.wave.3.fill", label: "App Audio") {
+            SecondaryActionButton(icon: "speaker.wave.3.fill", label: "App Audio") {
                 Task { await actions.presentAppPicker() }
             }
-
-            HomeTile(icon: "captions.bubble", label: "Subtitle Video…") {
+            SecondaryActionButton(icon: "captions.bubble", label: "Subtitle Video") {
                 Task { await actions.subtitleVideo() }
             }
         }
+        .frame(maxWidth: 460)
     }
 
     /// Always-visible card that documents the two dictation hotkeys so the
@@ -102,33 +118,47 @@ struct HomeView: View {
         )
     }
 
+    /// Whether the user is actively searching. When true we ignore the
+    /// hideRecent toggle and show results anyway — otherwise typing into
+    /// the search field with recents hidden was visibly a no-op and the
+    /// user couldn't tell if their query matched anything.
+    private var isSearching: Bool {
+        !search.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
     private var recent: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Recent")
+                Text(isSearching ? "Search results" : "Recent")
                     .font(.title3.weight(.semibold))
                 Spacer()
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        hideRecent.toggle()
+                if !isSearching {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            hideRecent.toggle()
+                        }
+                    } label: {
+                        Label(hideRecent ? "Show" : "Hide",
+                              systemImage: hideRecent ? "eye.slash" : "eye")
+                            .labelStyle(.titleAndIcon)
+                            .font(.callout)
                     }
-                } label: {
-                    Label(hideRecent ? "Show" : "Hide",
-                          systemImage: hideRecent ? "eye.slash" : "eye")
-                        .labelStyle(.titleAndIcon)
-                        .font(.callout)
+                    .buttonStyle(.borderless)
+                    .help(hideRecent
+                          ? "Show recent recordings"
+                          : "Hide recent recordings (useful when sharing your screen)")
                 }
-                .buttonStyle(.borderless)
-                .help(hideRecent
-                      ? "Show recent recordings"
-                      : "Hide recent recordings (useful when sharing your screen)")
             }
 
-            if hideRecent {
+            // While searching, we always show results — even if recents are
+            // hidden — because otherwise typing into the search box produces
+            // no visible feedback. The hideRecent preference only governs
+            // the idle (no-search) case.
+            if hideRecent && !isSearching {
                 hiddenPlaceholder
             } else {
                 BucketedRecordingsView(
-                    recordings: recentRecordings,
+                    recordings: isSearching ? allRecordings : recentRecordings,
                     search: search,
                     selection: $selection
                 )
@@ -166,15 +196,24 @@ struct HomeView: View {
     private var recentRecordings: [Recording] {
         Array(store.recordings.filter { !$0.isTrashed }.prefix(30))
     }
+
+    /// Full set used when searching — capped looser than the idle Recent
+    /// list because the user explicitly asked for matches and might be
+    /// hunting through old material.
+    private var allRecordings: [Recording] {
+        store.recordings.filter { !$0.isTrashed }
+    }
 }
 
-private struct HomeTile: View {
-    let icon: String
-    let label: String
-    var isActive: Bool = false
-    /// Optional emoji shown in the upper-right of the tile (we use it to
-    /// expose the active recording language flag on the Voice Memo tile).
-    var badge: String? = nil
+/// Big primary "Record voice memo" CTA on Home. Replaces the old grid of
+/// four equally-sized tiles where Voice Memo had no visual edge over
+/// "Open Files". Idle state uses the system accent; the active state
+/// flips to red with a pulsing ring so a glance across the room tells
+/// you whether you're recording.
+private struct HeroRecordButton: View {
+    let isRecording: Bool
+    let languageFlag: String
+    let languageName: String
     let action: () -> Void
 
     @State private var hovering = false
@@ -182,63 +221,124 @@ private struct HomeTile: View {
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 12) {
-                ZStack(alignment: .topTrailing) {
-                    Image(systemName: icon)
-                        .font(.system(size: 30, weight: .semibold))
-                        .foregroundStyle(isActive ? Color.red : Color.primary.opacity(0.85))
-                        .frame(width: 48, height: 38)
-
-                    if isActive {
+            HStack(spacing: 16) {
+                ZStack {
+                    Circle()
+                        .fill(.white.opacity(0.18))
+                        .frame(width: 56, height: 56)
+                    if isRecording {
                         Circle()
-                            .fill(Color.red)
-                            .frame(width: 8, height: 8)
+                            .stroke(Color.white.opacity(0.5), lineWidth: 2)
+                            .frame(width: 56, height: 56)
                             .scaleEffect(pulse ? 1.6 : 1.0)
-                            .opacity(pulse ? 0 : 1)
-                            .offset(x: 8, y: -2)
+                            .opacity(pulse ? 0 : 0.9)
+                    }
+                    Image(systemName: isRecording ? "stop.fill" : "mic.fill")
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(isRecording ? "Recording…" : "Record")
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(.white)
+                    HStack(spacing: 6) {
+                        Text(languageFlag)
+                            .font(.callout)
+                        Text(isRecording
+                             ? "Tap to stop"
+                             : "Voice memo · \(languageName)")
+                            .font(.callout)
+                            .foregroundStyle(.white.opacity(0.85))
                     }
                 }
 
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 18)
+            .frame(maxWidth: .infinity)
+            .background(
+                LinearGradient(
+                    colors: backgroundColors,
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(Color.white.opacity(hovering ? 0.25 : 0.12), lineWidth: 1)
+            )
+            .shadow(color: shadowColor, radius: hovering ? 14 : 8, y: 4)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("home.record.hero")
+        .onHover { hovering = $0 }
+        .onAppear { startPulseIfNeeded() }
+        .onChange(of: isRecording) { _, _ in startPulseIfNeeded() }
+    }
+
+    /// Two-stop gradient: bright accent when idle, deep red when recording.
+    /// The gradient sells the affordance better than a flat fill — buttons
+    /// you "press to record" tend to look ceremonial in real apps.
+    private var backgroundColors: [Color] {
+        if isRecording {
+            return [Color(red: 0.93, green: 0.27, blue: 0.27),
+                    Color(red: 0.78, green: 0.18, blue: 0.18)]
+        }
+        return [Color.accentColor,
+                Color.accentColor.opacity(0.78)]
+    }
+
+    private var shadowColor: Color {
+        isRecording ? Color.red.opacity(0.35) : Color.accentColor.opacity(0.35)
+    }
+
+    private func startPulseIfNeeded() {
+        guard isRecording else { pulse = false; return }
+        pulse = false
+        withAnimation(.easeOut(duration: 1.1).repeatForever(autoreverses: false)) {
+            pulse = true
+        }
+    }
+}
+
+/// Compact text-button entry for the three lower-priority actions. Lives
+/// next to the hero record button so users can still get to imports / app
+/// audio / video subtitles in one tap, but the visual weight matches
+/// their priority — light, borderless, hover-feedback only.
+private struct SecondaryActionButton: View {
+    let icon: String
+    let label: String
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.tint)
                 Text(label)
-                    .font(.subheadline.weight(.medium))
+                    .font(.callout.weight(.medium))
                     .foregroundStyle(.primary)
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
             .frame(maxWidth: .infinity)
-            .frame(height: 100)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-            .overlay(alignment: .topTrailing) {
-                if let badge {
-                    Text(badge)
-                        .font(.system(size: 16))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(.thinMaterial, in: Capsule())
-                        .padding(8)
-                }
-            }
+            .background(
+                hovering ? Color.primary.opacity(0.08) : Color.primary.opacity(0.04),
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+            )
             .overlay(
-                RoundedRectangle(cornerRadius: 14)
-                    .strokeBorder(borderColor, lineWidth: 1)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .onAppear { startPulseIfNeeded() }
-        .onChange(of: isActive) { _, _ in startPulseIfNeeded() }
-    }
-
-    private var borderColor: Color {
-        if isActive { return Color.red.opacity(0.6) }
-        if hovering { return Color.accentColor.opacity(0.7) }
-        return Color.primary.opacity(0.07)
-    }
-
-    private func startPulseIfNeeded() {
-        guard isActive else { pulse = false; return }
-        pulse = false
-        withAnimation(.easeOut(duration: 0.9).repeatForever(autoreverses: false)) {
-            pulse = true
-        }
     }
 }
 

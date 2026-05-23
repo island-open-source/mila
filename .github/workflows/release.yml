@@ -218,8 +218,10 @@ jobs:
       - name: Sign ZIP with Sparkle EdDSA + publish to update server
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-          BUCKET: island-mila-updates
-          FEED_URL_BASE: https://island-mila-updates.internal.island.io
+          # Keep the legacy `island-whisper-updates` bucket + hostname so
+          # existing installs continue to auto-update without infra changes.
+          BUCKET: island-whisper-updates
+          FEED_URL_BASE: https://island-whisper-updates.internal.island.io
         run: |
           set -euo pipefail
           DMG="${{ steps.dmg.outputs.dmg }}"
@@ -270,7 +272,7 @@ jobs:
           aws s3 cp "$DMG" "s3://${BUCKET}/${DMG}" \
             --content-type application/octet-stream
           # Also publish under a stable "latest" name so people can link to
-          # https://island-mila-updates.internal.island.io/Mila-latest.dmg
+          # https://island-whisper-updates.internal.island.io/Mila-latest.dmg
           # and always get the newest build without infra changes (no
           # CloudFront redirect, no S3 website routing). Server-side copy
           # so we don't pay to upload twice.
