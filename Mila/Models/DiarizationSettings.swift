@@ -40,7 +40,8 @@ final class DiarizationSettings: ObservableObject {
     @Published private(set) var pythonFound: Bool
 
     init(defaults: UserDefaults = .standard,
-         bootstrap: DiarizationBootstrap? = nil) {
+         bootstrap: DiarizationBootstrap? = nil,
+         defaultEnabledIfUnset: Bool = false) {
         self.defaults = defaults
         // Build the default bootstrap inside the init rather than via a
         // default-argument expression — `DiarizationBootstrap.init` is
@@ -48,7 +49,15 @@ final class DiarizationSettings: ObservableObject {
         // the caller's isolation context, which made the previous default
         // unusable from non-isolated entry points.
         self.bootstrap = bootstrap ?? DiarizationBootstrap()
-        self.isEnabled = defaults.bool(forKey: "diarization.enabled")
+        // `defaultEnabledIfUnset` is the fresh-install default when no value
+        // has been persisted. Injected by the caller rather than registered
+        // on `.standard` because the unit-test process loads MilaApp's
+        // executable as TEST_HOST; a `.standard` registration in MilaApp.init
+        // would leak into the test process and trigger the launch-time
+        // checkDeps subprocess on every test run, starving timing-sensitive
+        // tests of the cooperative thread pool. MilaApp passes `true`; tests
+        // omit the argument and get the historical `false`.
+        self.isEnabled = (defaults.object(forKey: "diarization.enabled") as? Bool) ?? defaultEnabledIfUnset
         let path = defaults.string(forKey: "diarization.pythonPath") ?? "/usr/bin/python3"
         self.pythonPath = path
         self._pythonFound = Published(initialValue: FileManager.default.fileExists(atPath: path))
@@ -61,9 +70,30 @@ final class DiarizationSettings: ObservableObject {
         // recording would complete with no speaker labels. Run the cheap
         // file-existence check here so the gate matches reality at startup.
         self.bootstrap.refreshReadyState()
-        if isEnabled && pythonFound && verificationStatus != .verified {
-            Task { await checkDeps() }
-        }
+    }
+
+    /// Re-verify the diarization Python deps on launch when the user has
+    /// enabled diarization but the last verify result isn't cached. Called
+    /// from MilaApp's body `.task` — deliberately NOT from `init` so the
+    /// python3 subprocess `checkDeps` spawns doesn't fire inside the
+    /// unit-test process (which loads MilaApp as TEST_HOST but never
+    /// renders the SwiftUI body). That subprocess starves the cooperative
+    /// thread pool and was the root cause of multiple timing-sensitive
+    /// test flakes (`LLMRunnerTests.test_timeout_fires…`,
+    /// `TranscriptionServiceTests.test_progress_updates…`).
+    func runStartupCheckDepsIfNeeded() async {
+        guard isEnabled, pythonFound, verificationStatus != .verified else { return }
+        await checkDeps()
+    }
+
+    /// Start the bundled-Python torch-wheel download if diarization is on by
+    /// default but the bootstrap hasn't run yet. Called from MilaApp's body
+    /// `.task` on launch — same isolation rationale as `runStartupCheckDepsIfNeeded`.
+    /// Idempotent; `bootstrapIfNeeded` returns immediately if torch is already
+    /// installed in the user-writable site-packages.
+    func startAutoBootstrapIfNeeded() async {
+        guard isEnabled, hasBundledRuntime else { return }
+        await bootstrap.bootstrapIfNeeded()
     }
 
     private var isVerified: Bool {

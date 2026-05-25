@@ -51,7 +51,17 @@ struct MilaApp: App {
     init() {
         let store = RecordingStore()
         let mgr = ModelManager(modelsDirectory: store.modelsDirectory)
-        let diarSettings = DiarizationSettings()
+        // Diarization is on by default for fresh installs so the bundled
+        // Python runtime auto-downloads its torch wheels on first launch
+        // and speaker labels work without the user opening Settings. Users
+        // who previously toggled the setting either way have an explicit
+        // value persisted, which shadows this default. Passed as a ctor
+        // argument rather than registered on `UserDefaults.standard` because
+        // the unit-test process loads MilaApp as TEST_HOST — a global
+        // registration would leak into tests and fire DiarizationSettings'
+        // launch-time checkDeps subprocess, starving the cooperative thread
+        // pool that timing-sensitive tests depend on.
+        let diarSettings = DiarizationSettings(defaultEnabledIfUnset: true)
         let svc = TranscriptionService(store: store, modelManager: mgr, diarizationSettings: diarSettings)
         let session = RecordingSession()
         let langSettings = RecordingLanguageSettings()
@@ -102,6 +112,8 @@ struct MilaApp: App {
                 .frame(minWidth: 1000, minHeight: 640)
                 .task { ensureDefaultModelsInstalled() }
                 .task { await diarizationSettings.runHealthCheck() }
+                .task { await diarizationSettings.runStartupCheckDepsIfNeeded() }
+                .task { await diarizationSettings.startAutoBootstrapIfNeeded() }
                 .onAppear { wireDelegate() }
                 .task { maybeRelocateBundle() }
         }

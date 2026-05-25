@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+body { font: 11px -apple-system, sans-serif; color: #222; margin: 0; padding: 6px 4px; }
+h2 { font-size: 11px; margin: 8px 0 2px 0; text-transform: uppercase; letter-spacing: 0.06em; color: #555; }
+p { margin: 0 0 6px 0; line-height: 1.4; }
+ul { margin: 0 0 6px 0; padding-left: 14px; }
+li { margin: 1px 0; line-height: 1.4; }
+a { color: #0066cc; text-decoration: none; }
+.note { color: #777; font-size: 10px; }
+</style>
+</head>
+<body>
+
+<p>Written by Uri Harduf from <a href="https://island.io">Island</a>.</p>
+
+<h2>Bundled Components</h2>
+<ul>
+  <li><a href="https://github.com/ggml-org/whisper.cpp">whisper.cpp</a> — local Whisper inference (MIT)</li>
+  <li><a href="https://github.com/sparkle-project/Sparkle">Sparkle</a> — auto-updates (MIT)</li>
+  <li><a href="https://huggingface.co/pyannote/segmentation-3.0">pyannote/segmentation-3.0</a> — speaker segmentation weights (MIT)</li>
+  <li><a href="https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM">pyannote-wespeaker-voxceleb-resnet34-LM</a> — speaker embedding weights</li>
+</ul>
+
+<h2>Downloaded on First Use</h2>
+<ul>
+  <li>OpenAI <a href="https://github.com/openai/whisper">Whisper</a> <code>large-v3-turbo</code> ggml weights, via <a href="https://huggingface.co/ggerganov/whisper.cpp">ggerganov/whisper.cpp</a> (MIT)</li>
+  <li><a href="https://www.ivrit.ai">ivrit.ai</a> <code>whisper-large-v3</code> Hebrew finetune (Apache-2.0)</li>
+  <li><a href="https://pytorch.org">PyTorch</a> and <code>torchaudio</code> from <code>download.pytorch.org</code> (BSD-3-Clause)</li>
+  <li><a href="https://github.com/pyannote/pyannote-audio">pyannote.audio</a> and its transitive deps (<code>speechbrain</code>, <code>pytorch-lightning</code>, <code>huggingface_hub</code>, <code>soundfile</code>, <code>numpy</code>) — MIT / Apache-2.0 / BSD-3-Clause</li>
+</ul>
+
+<p class="note">See <code>THIRD_PARTY_NOTICES.md</code> in the source repository for full attribution and license links.</p>
+
+</body>
+</html>
