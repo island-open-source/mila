@@ -17,17 +17,15 @@ settings:
     SWIFT_STRICT_CONCURRENCY: minimal
     GENERATE_INFOPLIST_FILE: NO
     PRODUCT_BUNDLE_IDENTIFIER: io.island.whisper.IslandWhisper
-    MARKETING_VERSION: "1.5.0"
-    # 1.5.0 ships the first publishable open-source release: speaker
-    # diarization is now on by default on fresh installs (the bundled
-    # Python runtime auto-downloads its torch wheels on first launch),
-    # the repo gains a PolyForm Noncommercial 1.0.0 LICENSE.md plus a
-    # THIRD_PARTY_NOTICES.md, and the macOS About panel auto-loads a
-    # bundled Credits.html with full third-party attribution. SemVer
-    # MINOR because the default-on behavior is a user-visible feature
-    # addition; existing users with an explicit diarization preference
-    # are unaffected (register-via-ctor-arg, not UserDefaults.standard).
-    CURRENT_PROJECT_VERSION: "29"
+    MARKETING_VERSION: "1.6.0"
+    # 1.6.0 adds Live AI mode (live transcript + LLM-driven summary
+    # and action items via the configured Claude/Cursor CLI), the
+    # Hebrew RTL layout fixes for both live and saved-recording
+    # views, the audio loopback E2E test scaffold, and the Zoom
+    # meeting prompt's 60-minute snooze on dismiss. Builds on top
+    # of v1.5.0's diarization-by-default + open-source attribution
+    # foundation.
+    CURRENT_PROJECT_VERSION: "30"
 
 packages:
   TranscriptionCore:

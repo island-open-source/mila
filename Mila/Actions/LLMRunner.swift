@@ -75,13 +75,23 @@ enum LLMRunner {
                     prompt: String,
                     transcript: String,
                     executablePathOverride: String?,
+                    model: String? = nil,
+                    session: LLMSession = .none,
                     timeout: TimeInterval = LLMRunner.defaultTimeout) async throws -> String {
         guard tool != .none else { throw LLMRunnerError.toolDisabled }
 
         let executable = try resolveExecutable(tool: tool,
                                                override: executablePathOverride)
         let fullPrompt = composedPrompt(prompt, transcript: transcript)
-        print("LLMRunner: \(executable.lastPathComponent) prompt=\(fullPrompt.count)c timeout=\(Int(timeout))s")
+        let modelTag = (model?.isEmpty ?? true) ? "(default)" : (model ?? "")
+        let sessionTag: String = {
+            switch session {
+            case .none: return "none"
+            case .new(let id): return "new:\(id.uuidString.prefix(8))"
+            case .resume(let id): return "resume:\(id.uuidString.prefix(8))"
+            }
+        }()
+        print("LLMRunner: \(executable.lastPathComponent) model=\(modelTag) session=\(sessionTag) prompt=\(fullPrompt.count)c timeout=\(Int(timeout))s")
         // ProcessHandle bridges Swift task cancellation to the underlying
         // `Process`. The continuation thread `attach`es the real Process
         // once it's spawned; if the Task was already cancelled by then
@@ -92,12 +102,23 @@ enum LLMRunner {
         let handle = ProcessHandle()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
+                // For Live AI's session continuity to work, every tick
+                // must share a CWD so claude's per-CWD session
+                // storage stays addressable. We key the stable
+                // sandbox off the session UUID.
+                let sandboxKey: String? = {
+                    switch session {
+                    case .none: return nil
+                    case .new(let id), .resume(let id): return id.uuidString
+                    }
+                }()
                 DispatchQueue.global(qos: .userInitiated).async {
                     do {
                         let result = try runProcess(executable: executable,
-                                                    arguments: tool.arguments(prompt: fullPrompt),
+                                                    arguments: tool.arguments(prompt: fullPrompt, model: model, session: session),
                                                     timeout: timeout,
-                                                    handle: handle)
+                                                    handle: handle,
+                                                    sandboxKey: sandboxKey)
                         continuation.resume(returning: result)
                     } catch {
                         continuation.resume(throwing: error)
@@ -112,7 +133,8 @@ enum LLMRunner {
     private static func runProcess(executable: URL,
                                    arguments: [String],
                                    timeout: TimeInterval,
-                                   handle: ProcessHandle) throws -> String {
+                                   handle: ProcessHandle,
+                                   sandboxKey: String? = nil) throws -> String {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
@@ -130,7 +152,25 @@ enum LLMRunner {
         // Desktop / Downloads". Launching from an isolated, empty directory
         // guarantees there's nothing for the LLM CLI to discover and reach
         // for, so no permission prompts fire.
-        let sandbox = makeSandboxDirectory()
+        //
+        // When `sandboxKey` is non-nil we use a STABLE per-key sandbox
+        // instead of a fresh one. claude stores its session jsonl
+        // inside a hash of the CWD — if every tick spawns in a
+        // different sandbox, `--resume <uuid>` errors with "No
+        // conversation with ID …" because the storage lives in the
+        // previous (already-deleted) sandbox. Live AI passes the
+        // session UUID as the key so all ticks share one sandbox; the
+        // caller is responsible for cleaning it up via
+        // `cleanupStableSandbox(key:)` when the session ends.
+        let sandbox: URL
+        let ephemeral: Bool
+        if let key = sandboxKey {
+            sandbox = stableSandboxDirectory(key: key)
+            ephemeral = false
+        } else {
+            sandbox = makeSandboxDirectory()
+            ephemeral = true
+        }
         process.currentDirectoryURL = sandbox
 
         // Close stdin immediately. Some CLIs (claude) read both stdin AND
@@ -144,7 +184,14 @@ enum LLMRunner {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
-        defer { try? FileManager.default.removeItem(at: sandbox) }
+        // Only tear down the sandbox if it was ephemeral. Stable
+        // session sandboxes are cleaned up by the caller when the
+        // Live AI session ends.
+        defer {
+            if ephemeral {
+                try? FileManager.default.removeItem(at: sandbox)
+            }
+        }
 
         do {
             try process.run()
@@ -219,6 +266,30 @@ enum LLMRunner {
         try? FileManager.default.createDirectory(at: url,
                                                   withIntermediateDirectories: true)
         return url
+    }
+
+    /// Stable sandbox directory for a Claude session keyed by `key`
+    /// (the session UUID). Reused across every tick of a Live AI
+    /// session so claude's per-CWD session storage stays put and
+    /// `--resume <uuid>` keeps finding the conversation.
+    static func stableSandboxDirectory(key: String) -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("island-mila-llm-session-\(key)",
+                                    isDirectory: true)
+        try? FileManager.default.createDirectory(at: url,
+                                                  withIntermediateDirectories: true)
+        return url
+    }
+
+    /// Tear down a stable session sandbox. Safe to call when the
+    /// directory doesn't exist. Should be called by the Live AI
+    /// session when it cancels so /tmp doesn't accumulate stale
+    /// session dirs across recordings.
+    static func cleanupStableSandbox(key: String) {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("island-mila-llm-session-\(key)",
+                                    isDirectory: true)
+        try? FileManager.default.removeItem(at: url)
     }
 
     private static func resolveExecutable(tool: LLMTool,

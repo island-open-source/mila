@@ -35,6 +35,13 @@ struct HistoryListView: View {
             .padding(.bottom, 24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        // Force the ScrollView to fit the detail pane height instead of
+        // expanding to its content's intrinsic height. Without this,
+        // NavigationSplitView's column layout misaligned both the
+        // detail pane and the sidebar (visible as the sidebar's
+        // Home/Queue/More items being scrolled off the top of the
+        // visible area).
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -67,6 +74,7 @@ struct FolderListView: View {
             .padding(.bottom, 24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityIdentifier("folder.list.\(folderName)")
     }
 }
@@ -100,6 +108,7 @@ struct DefaultFolderListView: View {
             .padding(.bottom, 24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityIdentifier("folder.list.default")
     }
 }

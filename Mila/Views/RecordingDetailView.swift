@@ -21,7 +21,21 @@ struct RecordingDetailView: View {
         VStack(spacing: 0) {
             header
             Divider()
+            AIOverviewSection(
+                summary: recording.summary,
+                items: recording.actionItems ?? [],
+                recordingLanguage: recording.language
+            )
             transcriptArea
+                // Force the transcript area to take the remaining
+                // vertical space and scroll its OWN content rather than
+                // expanding to the segments' intrinsic height. Without
+                // this, a transcript with many segments made the VStack
+                // grow to ~1500 px in a 700 px window and the content
+                // overflowed upward past the title bar, leaving the
+                // user with a blank window. Reproduced via accessibility
+                // tree inspection.
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
             playbackBar
         }
@@ -178,13 +192,34 @@ struct RecordingDetailView: View {
         transcription.enqueue(copy)
     }
 
+
+    /// Human-readable name of the whisper model that will run for the
+    /// recording's CURRENT language. Prefers `recording.modelName` once
+    /// transcription has started writing it back to the store (that's
+    /// what the engine actually used), otherwise falls back to the
+    /// model selected for the recording's language.
+    private var activeTranscriptionModelName: String {
+        if let name = recording.modelName, !name.isEmpty { return name }
+        if let model = modelManager.model(for: recording.language) {
+            return model.displayName
+        }
+        return modelManager.selectedModel()?.displayName ?? ""
+    }
+
     @ViewBuilder
     private var transcriptArea: some View {
         if transcription.activeRecordingID == recording.id {
             VStack(spacing: 12) {
                 Spacer()
                 ProgressView(value: transcription.progress) {
-                    Text("Transcribing with \(modelManager.selectedModel()?.displayName ?? "")…")
+                    // Use the model for THIS recording's language, not
+                    // `modelManager.selectedModel()` (the user's
+                    // global default). Otherwise re-transcribing a
+                    // recording in English while the user has Hebrew
+                    // pinned globally still says "Transcribing with
+                    // ivrit-ai…" while actually running OpenAI Turbo,
+                    // which was the bug reported.
+                    Text("Transcribing with \(activeTranscriptionModelName)…")
                 }
                 .progressViewStyle(.linear)
                 .frame(maxWidth: 360)
@@ -202,11 +237,20 @@ struct RecordingDetailView: View {
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 4) {
+                    // Show the speaker column whenever ANY segment has a
+                    // speaker label — that's how the user knows
+                    // diarization actually ran for this recording.
+                    // Dictation segments have nil speakers, so they
+                    // naturally hide the column; a meeting where
+                    // pyannote found only 1 speaker still shows
+                    // "Speaker A" so the user gets feedback that the
+                    // detection ran (vs. silently failing to detect).
                     let hasSpeakers = recording.segments.contains { $0.speaker != nil }
                     ForEach(recording.segments) { seg in
                         SegmentRow(segment: seg,
                                    isActive: currentTime >= seg.start && currentTime < seg.end,
                                    showSpeaker: hasSpeakers,
+                                   language: recording.language,
                                    onTap: { seek(to: seg.start) })
                     }
                 }
@@ -277,39 +321,161 @@ struct RecordingDetailView: View {
 }
 
 private struct PlayPauseButton: View {
-    @ObservedObject private var bridge: PlayerBridge
-
-    init(player: AVPlayer) {
-        _bridge = ObservedObject(wrappedValue: PlayerBridge(player: player))
-    }
+    let player: AVPlayer
+    /// Stable local state. The previous design wrapped the player in a
+    /// `PlayerBridge` ObservableObject and used `@ObservedObject`,
+    /// which RE-INSTANTIATED the bridge (and a fresh KVO observer)
+    /// on every parent re-render. As soon as playback started, the
+    /// time observer in `configurePlayer` fired ~30×/sec and forced
+    /// re-renders of the playback bar — each one tore down the old
+    /// bridge, briefly read `timeControlStatus == .paused` while the
+    /// new bridge was warming up, and flipped the icon back to "play"
+    /// for one frame before the KVO callback caught up. Hence the
+    /// flicker. Owning a plain @State Bool + a single long-lived
+    /// observer in onAppear is enough.
+    @State private var isPlaying: Bool = false
+    @State private var observer: NSKeyValueObservation?
 
     var body: some View {
         Button {
-            bridge.toggle()
+            if player.timeControlStatus == .playing {
+                player.pause()
+            } else {
+                player.play()
+            }
         } label: {
-            Image(systemName: bridge.isPlaying ? "pause.fill" : "play.fill")
+            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                 .frame(width: 18, height: 18)
         }
         .buttonStyle(.borderedProminent)
+        .onAppear {
+            isPlaying = (player.timeControlStatus == .playing)
+            // KVO on timeControlStatus is enough — fires on every
+            // transition between paused / waiting / playing.
+            observer = player.observe(\.timeControlStatus, options: [.new]) { p, _ in
+                DispatchQueue.main.async {
+                    isPlaying = (p.timeControlStatus == .playing)
+                }
+            }
+        }
+        .onDisappear {
+            observer?.invalidate()
+            observer = nil
+        }
     }
 }
 
-@MainActor
-private final class PlayerBridge: ObservableObject {
-    @Published var isPlaying = false
-    let player: AVPlayer
-    private var token: NSKeyValueObservation?
+/// Live-AI summary + action items, captured at recording stop time and
+/// persisted onto the Recording. Extracted into its own `View` rather
+/// than a `@ViewBuilder` var on the parent so the body's type inference
+/// is contained: a SwiftUI hiccup inside this section never silently
+/// blanks the rest of the detail screen, which is the symptom the user
+/// was hitting when both the sidebar and the detail pane went empty
+/// after transcription completed.
+private struct AIOverviewSection: View {
+    let summary: String?
+    let items: [ActionItem]
+    let recordingLanguage: String
 
-    init(player: AVPlayer) {
-        self.player = player
-        token = player.observe(\.timeControlStatus, options: [.new, .initial]) { [weak self] p, _ in
-            DispatchQueue.main.async {
-                self?.isPlaying = (p.timeControlStatus == .playing)
+    /// Hide the whole section when there's nothing to show. Old
+    /// recordings + non-Live-AI recordings simply collapse this to an
+    /// EmptyView so the detail screen doesn't have an empty gap above
+    /// the transcript.
+    private var hasContent: Bool {
+        (summary?.isEmpty == false) || !items.isEmpty
+    }
+
+    /// Section-level RTL decision: prefer the actual text content
+    /// because the language dropdown may have been left on English
+    /// while the conversation happened in Hebrew.
+    private var sectionIsRTL: Bool {
+        let blob = (summary ?? "") + " " + items.map(\.text).joined(separator: " ")
+        return blob.isPredominantlyHebrew || recordingLanguage == "he"
+    }
+
+    var body: some View {
+        if hasContent {
+            // Use explicit `.trailing` alignment for Hebrew rather than
+            // flipping `\.layoutDirection`. The environment approach
+            // made the ScrollView mis-measure its frame when the
+            // sidebar was open — the Hebrew block ended up shifted
+            // LEFT of the pane by the sidebar's width. Same fix
+            // pattern as `LiveAIRecordingView.liveTranscriptPane`.
+            let alignmentValue: Alignment = sectionIsRTL ? .trailing : .leading
+            let multilineAlignment: TextAlignment = sectionIsRTL ? .trailing : .leading
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if let summary, !summary.isEmpty {
+                            summaryView(summary,
+                                        alignment: alignmentValue,
+                                        multiline: multilineAlignment)
+                        }
+                        if !items.isEmpty {
+                            actionItemsView(alignment: alignmentValue,
+                                            multiline: multilineAlignment)
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity, alignment: alignmentValue)
+                }
+                // Hard cap so a recording with many action items or a
+                // long summary can NEVER push the transcript /
+                // playback bar off-screen. The inner content scrolls
+                // independently inside this slot if it exceeds 240 pt.
+                .frame(maxHeight: 240)
+                Divider()
             }
         }
     }
-    func toggle() {
-        if player.timeControlStatus == .playing { player.pause() } else { player.play() }
+
+    private func summaryView(_ text: String,
+                             alignment: Alignment,
+                             multiline: TextAlignment) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label("Summary", systemImage: "sparkles")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.tint)
+            Text(text)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: alignment)
+                .multilineTextAlignment(multiline)
+        }
+    }
+
+    private func actionItemsView(alignment: Alignment,
+                                 multiline: TextAlignment) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label("Action items", systemImage: "checklist")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.tint)
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(items) { item in
+                    ActionItemDetailRow(text: item.text,
+                                        alignment: alignment,
+                                        multiline: multiline)
+                }
+            }
+        }
+    }
+}
+
+private struct ActionItemDetailRow: View {
+    let text: String
+    let alignment: Alignment
+    let multiline: TextAlignment
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text("•").foregroundStyle(.secondary)
+            Text(text)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: alignment)
+                .multilineTextAlignment(multiline)
+        }
     }
 }
 
@@ -317,24 +483,33 @@ private struct SegmentRow: View {
     let segment: TranscriptSegment
     let isActive: Bool
     let showSpeaker: Bool
+    /// Recording's language so we can render the raw `SPEAKER_00`
+    /// label from pyannote as `Speaker A` / `דובר א׳` in the user's
+    /// language — matching the labels the live view + post-recording
+    /// action items already show.
+    let language: String
     let onTap: () -> Void
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(formatDuration(segment.start))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 56, alignment: .trailing)
-            if showSpeaker {
-                Text(segment.speaker ?? "")
-                    .font(.caption.weight(.semibold))
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            // Speaker prefix sits TIGHT against the text — fixed-width
+            // columns introduced a gap (~30 pt) between the friendly
+            // label "Speaker A" / "דובר א׳" and the actual content.
+            // `fixedSize` keeps the label at its natural width.
+            if showSpeaker, let raw = segment.speaker, !raw.isEmpty {
+                Text(raw.friendlySpeakerLabel(language: language) + ":")
+                    .font(.body.weight(.semibold))
                     .foregroundStyle(.tint)
-                    .frame(width: 72, alignment: .leading)
+                    .fixedSize(horizontal: true, vertical: false)
             }
             Text(segment.text)
                 .font(.body)
                 .multilineTextAlignment(.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            Text(formatDuration(segment.start))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .fixedSize()
         }
         .padding(8)
         .background(isActive ? Color.accentColor.opacity(0.18) : .clear,

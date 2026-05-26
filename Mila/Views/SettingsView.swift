@@ -3,7 +3,7 @@ import AppKit
 import Carbon.HIToolbox
 
 enum SettingsTab: Int, Hashable {
-    case hotkeys, audio, models, llm, speakers
+    case hotkeys, audio, models, llm, speakers, meetings, liveAI
 }
 
 @Observable
@@ -33,6 +33,12 @@ struct SettingsView: View {
             DiarizationSettingsTab()
                 .tabItem { Label("Speakers", systemImage: "person.2") }
                 .tag(SettingsTab.speakers)
+            MeetingsSettingsTab()
+                .tabItem { Label("Meetings", systemImage: "video.fill") }
+                .tag(SettingsTab.meetings)
+            LiveAISettingsTab()
+                .tabItem { Label("Live AI", systemImage: "sparkles.tv") }
+                .tag(SettingsTab.liveAI)
         }
         .frame(width: 560, height: 560)
         .padding(20)
@@ -748,5 +754,268 @@ private struct DiarizationSettingsTabContent: View {
         if diarization.isHealthChecking { return "Checking…" }
         guard let result = diarization.healthCheckResult else { return "Not checked yet" }
         return result.ok ? "Speaker detection is working" : "Speaker detection unavailable"
+    }
+}
+
+// MARK: - Meetings
+
+/// Settings → Meetings. Toggles the floating "Zoom meeting detected" prompt
+/// and surfaces the per-app silence list so a user who clicked
+/// "Don't show this for Zoom" inside the prompt can undo that without
+/// hunting through UserDefaults.
+private struct MeetingsSettingsTab: View {
+    @EnvironmentObject private var settings: MeetingDetectionSettings
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                header
+                Toggle(isOn: $settings.enabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Offer to transcribe when a meeting starts")
+                            .font(.body)
+                        Text("Mila shows a small prompt in the top-right when it sees you join a meeting in a supported app.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .toggleStyle(.switch)
+                .controlSize(.regular)
+
+                Divider()
+
+                supportedAppsBlock
+                silencedAppsBlock
+
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Meetings")
+                .font(.title3.weight(.semibold))
+            Text("Auto-prompt when Mila notices you're in a call so you don't have to remember to start recording.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var supportedAppsBlock: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Supported apps")
+                .font(.callout.weight(.semibold))
+            ForEach(MeetingDetector.supportedApps, id: \.bundleID) { app in
+                HStack {
+                    Image(systemName: "video.fill")
+                        .foregroundStyle(.tint)
+                    Text(app.displayName)
+                    Spacer()
+                    if settings.isDisabled(forBundleID: app.bundleID) {
+                        Text("Silenced")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if !settings.enabled {
+                        Text("Off")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        Text("On")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var silencedAppsBlock: some View {
+        let silenced = MeetingDetector.supportedApps.filter {
+            settings.isDisabled(forBundleID: $0.bundleID)
+        }
+        if !silenced.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Silenced from inside the prompt")
+                    .font(.callout.weight(.semibold))
+                Text("You clicked \"Don't show this for X\" on one of these. Re-enable the prompt for them here.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(silenced, id: \.bundleID) { app in
+                    HStack {
+                        Text(app.displayName)
+                        Spacer()
+                        Button("Re-enable") {
+                            settings.reenable(bundleID: app.bundleID)
+                        }
+                        .controlSize(.small)
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Live AI
+
+/// Settings → Live AI. Hosts the master toggle, the cheap-model override,
+/// the system prompt editor (with reset-to-default), and the two cost
+/// dials that most users will never touch.
+private struct LiveAISettingsTab: View {
+    @EnvironmentObject private var settings: LiveAISettings
+    @EnvironmentObject private var llm: LLMSettings
+    @State private var showAdvanced: Bool = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                header
+                masterToggle
+                if !llm.isConfigured {
+                    notConfiguredHint
+                }
+                Divider()
+                promptEditor
+                advancedDisclosure
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Live AI mode")
+                .font(.title3.weight(.semibold))
+            Text("During a recording, Mila streams the transcript to your LLM every few seconds and surfaces action items in real time. Requires Claude or Cursor CLI set up under LLM.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var masterToggle: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Toggle(isOn: $settings.enabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Enable Live AI mode")
+                    Text("Off by default. When on, the home screen swaps to a split-pane recording view as soon as you press Record.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+
+            HStack {
+                Text("Output language")
+                    .font(.callout)
+                Spacer()
+                Picker("Output language", selection: $settings.outputLanguage) {
+                    ForEach(LiveAISettings.OutputLanguage.allCases) { lang in
+                        Text(lang.displayName).tag(lang)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 220)
+            }
+        }
+    }
+
+    private var notConfiguredHint: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            Text("No LLM CLI is configured under Settings → LLM. The toggle above is a no-op until you pick Claude or Cursor there.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(8)
+        .background(Color.orange.opacity(0.08),
+                    in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private var promptEditor: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("System prompt")
+                    .font(.callout.weight(.semibold))
+                Spacer()
+                Button("Reset to default") {
+                    settings.prompt = LiveAISettings.defaultPrompt
+                }
+                .controlSize(.small)
+            }
+            TextEditor(text: $settings.prompt)
+                .font(.system(.callout, design: .monospaced))
+                .frame(minHeight: 160)
+                .padding(4)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(Color.secondary.opacity(0.25))
+                )
+            Text("Tip: the default prompt asks for a strict JSON array so Mila can parse the response. Free-form prose will be ignored.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var advancedDisclosure: some View {
+        DisclosureGroup("Advanced", isExpanded: $showAdvanced) {
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Model").font(.callout.weight(.semibold))
+                    TextField(LiveAISettings.defaultModel, text: $settings.model)
+                        .textFieldStyle(.roundedBorder)
+                    Text("Passed to the CLI as `--model`. Default is the cheapest current Claude. Leave blank to let your CLI pick.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Update every").font(.callout.weight(.semibold))
+                        Spacer()
+                        Text("\(Int(settings.chunkSeconds))s")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(value: $settings.chunkSeconds, in: 3...20, step: 1)
+                    Text("How often Mila re-transcribes and re-prompts. Lower = more responsive, higher CPU + LLM cost.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Speaker similarity threshold").font(.callout.weight(.semibold))
+                        Spacer()
+                        Text(String(format: "%.2f", settings.speakerSimilarityThreshold))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(value: $settings.speakerSimilarityThreshold, in: 0.5...0.95, step: 0.01)
+                    Text("Higher values make the live diarizer more conservative about merging similar voices into one speaker.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.top, 6)
+        }
     }
 }

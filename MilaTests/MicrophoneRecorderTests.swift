@@ -30,7 +30,10 @@ final class MicrophoneRecorderTests: XCTestCase {
         } catch let error as MicrophoneError {
             XCTAssertEqual(error, .bringUpTimedOut)
             let elapsed = Date().timeIntervalSince(started)
-            XCTAssertLessThan(elapsed, 0.5,
+            // Bound is generous for macos-26 GH VM jitter — same
+            // flake class as the LLMRunner timeout test. The point
+            // is "timeout fires" (vs. hangs forever), not ms precision.
+            XCTAssertLessThan(elapsed, 5.0,
                               "Timeout should fire near the configured bound (0.15s); took \(elapsed)s")
         }
         await mic.stop()

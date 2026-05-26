@@ -1,0 +1,172 @@
+name: Live AI E2E
+
+# Hits the real Anthropic API to verify Mila's Live AI loop end-to-end:
+#  - session continuity (--session-id then --resume style)
+#  - items emerge + persist across ticks with stable ids
+#  - summary refreshes
+#  - no duplicate items after speaker restates them
+#
+# Lives on Ubuntu because the LLM logic is pure Python — no whisper /
+# Mila app code is exercised here. The Mac-side build + UI tests stay
+# in the regular CI workflow.
+#
+# Required repo secret: ANTHROPIC_API_KEY (sk-ant-...)
+# Cost per run: a few cents on Haiku (~12 short Claude calls).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/llm-live-ai-e2e.py'
+      - 'scripts/fixtures/**'
+      - 'Mila/Models/LiveAISettings.swift'
+      - 'Mila/Actions/LiveAISession.swift'
+      - '.github/workflows/llm-live-ai-e2e.yml'
+  pull_request:
+    paths:
+      - 'scripts/llm-live-ai-e2e.py'
+      - 'scripts/fixtures/**'
+      - 'Mila/Models/LiveAISettings.swift'
+      - 'Mila/Actions/LiveAISession.swift'
+      - '.github/workflows/llm-live-ai-e2e.yml'
+  workflow_dispatch:
+    inputs:
+      fixture:
+        description: "Path to a transcript fixture under scripts/fixtures/"
+        required: false
+        default: "scripts/fixtures/3min-meeting-en.txt"
+      minutes:
+        description: "Total simulated meeting length in minutes"
+        required: false
+        default: "3"
+
+jobs:
+  # Guard job determines whether the secret is configured. Its output
+  # is consumed by every other job's `if:` — `secrets.X` references in
+  # job-level `if:` conditions are not allowed by GitHub Actions
+  # (workflow_dispatch fails YAML parsing with "Unrecognized
+  # named-value: 'secrets'"), so we hop through this output instead.
+  guard:
+    name: Secret guard
+    runs-on: ubuntu-latest
+    outputs:
+      has_key: ${{ steps.check.outputs.has_key }}
+    steps:
+      - id: check
+        env:
+          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::warning::ANTHROPIC_API_KEY is not configured for this repo. The Live AI E2E + UI vision jobs were skipped."
+            echo "::warning::To enable: gh secret set ANTHROPIC_API_KEY -R \$GITHUB_REPOSITORY"
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ANTHROPIC_API_KEY is configured — E2E + vision jobs will run."
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  live-ai-en:
+    name: English meeting
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: guard
+    if: needs.guard.outputs.has_key == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install --upgrade anthropic
+      - name: Run E2E (English, 3 min)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python scripts/llm-live-ai-e2e.py \
+            --backend api \
+            --fixture scripts/fixtures/3min-meeting-en.txt \
+            --minutes ${{ github.event.inputs.minutes || '3' }}
+
+  live-ai-he:
+    name: Hebrew meeting
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: guard
+    if: needs.guard.outputs.has_key == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install --upgrade anthropic
+      - name: Run E2E (Hebrew, 3 min)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python scripts/llm-live-ai-e2e.py \
+            --backend api \
+            --fixture scripts/fixtures/3min-meeting-he.txt \
+            --minutes ${{ github.event.inputs.minutes || '3' }}
+
+  # macOS job: build Mila, run the existing XCTest UI tests (which
+  # write screenshots to /tmp/mila-ui-screenshots/), then feed those
+  # screenshots to Claude vision for a structural check. This catches
+  # the kind of layout regressions that frame-coordinate asserts miss
+  # (sidebar list scrolled out, detail pane collapsed, etc.).
+  ui-vision:
+    name: UI tests + vision check
+    runs-on: macos-26
+    timeout-minutes: 30
+    needs: guard
+    if: needs.guard.outputs.has_key == 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install xcodegen
+        run: brew install xcodegen
+      # The .xcodeproj references Mila/Resources/PythonRuntime as a
+      # bundled resource — the link step fails without it. Same cache
+      # key as ios-tests.yml so cold builds across the two workflows
+      # restore from a single entry.
+      - name: Cache diarization bundle
+        id: diar-bundle-cache
+        uses: actions/cache@v4
+        with:
+          path: Mila/Resources/PythonRuntime
+          key: diar-bundle-${{ runner.os }}-${{ hashFiles('scripts/build-diarization-bundle.sh') }}
+      - name: Build diarization bundle (cold path only)
+        if: steps.diar-bundle-cache.outputs.cache-hit != 'true'
+        run: make bundle-diarization
+      - name: Generate Xcode project
+        run: make project
+      - name: Run UI tests (writes screenshots to /tmp/mila-ui-screenshots/)
+        env:
+          MILA_UI_SCREENSHOTS_DIR: /tmp/mila-ui-screenshots
+        run: |
+          mkdir -p "$MILA_UI_SCREENSHOTS_DIR"
+          # Only the screenshot-bearing layout tests — the full UI
+          # suite is heavier and lives in the main CI workflow.
+          xcodebuild test \
+            -project Mila.xcodeproj \
+            -scheme Mila \
+            -destination 'platform=macOS' \
+            -only-testing:MilaUITests/DetailLayoutUITests \
+            -derivedDataPath build-uitests \
+            CODE_SIGNING_ALLOWED=NO || (echo "UI tests failed — vision check skipped" && exit 1)
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-screenshots
+          path: /tmp/mila-ui-screenshots/
+          if-no-files-found: warn
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --upgrade anthropic
+      - name: Visual regression check via Claude vision
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/llm-verify-screenshots.py
+

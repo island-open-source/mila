@@ -27,6 +27,17 @@ final class DictationController: ObservableObject {
     private var samples: [Float] = []
     private var streamTask: Task<Void, Never>?
 
+    /// Live transcriber used to surface partial transcripts in the
+    /// dictation overlay AND to remove the post-release transcription
+    /// wait. We rely on it being the *same instance* across dictations
+    /// (it's reset at the start of every press via `start(language:)`).
+    private let liveTranscriber: LiveTranscriber
+
+    /// Observation of `liveTranscriber.segments` so the overlay can show
+    /// the latest tentative text without the controller having to
+    /// manually push every update.
+    private var liveTextObserver: AnyCancellable?
+
     /// The app that was frontmost when this dictation started. Captured at
     /// `start(action:)` time and re-activated at `paste(_:)` time so the
     /// synthesized ⌘V always lands in the user's intended app — never in
@@ -41,10 +52,12 @@ final class DictationController: ObservableObject {
 
     init(store: RecordingStore,
          transcription: TranscriptionService,
-         hotkeySettings: HotkeySettings) {
+         hotkeySettings: HotkeySettings,
+         liveTranscriber: LiveTranscriber) {
         self.store = store
         self.transcription = transcription
         self.hotkeySettings = hotkeySettings
+        self.liveTranscriber = liveTranscriber
         registerHotkeys()
         bindingsObserver = hotkeySettings.$bindings
             .dropFirst()
@@ -84,6 +97,8 @@ final class DictationController: ObservableObject {
         guard case .recording = state else { return }
         await recorder.stop()
         streamTask?.cancel(); streamTask = nil
+        liveTextObserver?.cancel(); liveTextObserver = nil
+        _ = liveTranscriber.stop()
         samples.removeAll(keepingCapacity: true)
         targetApp = nil
         DictationOverlayWindow.shared.hide()
@@ -129,6 +144,21 @@ final class DictationController: ObservableObject {
         state = .recording(action)
         lastLanguage = action.languageCode
         DictationOverlayWindow.shared.show()
+        DictationOverlayWindow.shared.setLanguage(action.languageCode)
+
+        // Start the live transcriber so the overlay shows partial text
+        // and the user doesn't wait for a one-shot pass on release.
+        liveTranscriber.start(language: action.languageCode)
+        liveTextObserver = liveTranscriber.$segments
+            .receive(on: DispatchQueue.main)
+            .sink { segments in
+                let text = segments
+                    .map(\.text)
+                    .joined(separator: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                DictationOverlayWindow.shared.updateLiveText(text)
+            }
+
         streamTask = Task { [weak self] in
             guard let self else { return }
             for await buffer in self.recorder.audioStream {
@@ -138,6 +168,7 @@ final class DictationController: ObservableObject {
                     self.samples.append(contentsOf: chunk)
                     self.level = lvl
                     DictationOverlayWindow.shared.updateLevel(lvl)
+                    self.liveTranscriber.ingest(chunk[0..<chunk.count])
                 }
             }
         }
@@ -151,6 +182,19 @@ final class DictationController: ObservableObject {
 
         let captured = samples
         samples.removeAll(keepingCapacity: true)
+        liveTextObserver?.cancel()
+        liveTextObserver = nil
+        _ = liveTranscriber.stop()
+
+        // ALWAYS do a final one-shot pass over the full captured audio.
+        // We tried using `LiveTranscriber.formattedTranscript` as the
+        // authoritative paste text, but that's a snapshot of the
+        // sliding-window state — it only contains the last ~20 seconds
+        // of audio because earlier windows aged out. A 60-second
+        // dictation pasted as the last ~20 seconds. The live transcriber
+        // stays around purely for the overlay's "watch your words
+        // appear" UX; the FINAL text comes from one whisper pass over
+        // every sample we captured.
         let text = await transcription.transcribeOnce(samples: captured,
                                                       language: action.languageCode)
 

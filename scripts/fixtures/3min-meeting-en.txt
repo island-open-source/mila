@@ -1,0 +1,51 @@
+Alice: Thanks everyone for joining. Today we need to lock down the Q1 launch plan and divvy up the work.
+
+Bob: Sounds good. What's on the agenda?
+
+Alice: Three things — the launch checklist, the press release, and the infra cutover. I want owners for each by the end of this call.
+
+Carol: Happy to take the press release. I'll draft it by Wednesday and send it around for review.
+
+Bob: I can own the launch checklist. Friday work for the first draft?
+
+Alice: Friday's good. And Dave — can you handle the infra cutover?
+
+Dave: Yeah, I'll take it. I'll need to coordinate with the SRE team though.
+
+Alice: Sure, loop them in. What's a realistic deadline for infra?
+
+Dave: I'd say end of next week to be safe. Lots of moving parts.
+
+Alice: That works. Anything else before we move on?
+
+Bob: One thing — I'll need help from Dave for the deployment section of the checklist. Some of it depends on the infra cutover sequencing.
+
+Dave: Sure, we can sync on that. How about Tuesday afternoon?
+
+Bob: Tuesday afternoon works.
+
+Carol: While we're naming names, I'd also love a quick eyes-on from Alice on the press release before it goes out.
+
+Alice: Of course, just ping me when the draft is ready.
+
+Bob: Let me restate the actions so we're clear. Bob — launch checklist by Friday. Carol — press release draft by Wednesday, Alice reviews. Dave — infra cutover by end of next week. Bob and Dave sync Tuesday afternoon. Anything I missed?
+
+Alice: That covers it. One more thing — let's get a follow-up meeting on the calendar for Tuesday next week to check progress.
+
+Carol: I'll send the invite today. Same time?
+
+Alice: Same time works.
+
+Dave: One more — Carol, while you're talking to marketing about the press release, can you also confirm the launch date on the public website? It still says TBD.
+
+Carol: Good catch, I'll handle that too.
+
+Alice: Great. Anything else?
+
+Bob: Nothing from me.
+
+Carol: I'm good.
+
+Dave: Same.
+
+Alice: Then we're done. Thanks everyone, talk Tuesday.

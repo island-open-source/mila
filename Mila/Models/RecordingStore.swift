@@ -313,9 +313,74 @@ final class RecordingStore: ObservableObject {
             }
         }
         self.recordings = decoded.sorted { $0.createdAt > $1.createdAt }
-        if needsMigration {
-            persist()  // re-write JSON without inline fullText
+        let recovered = recoverOrphanRecordings()
+        if needsMigration || !recovered.isEmpty {
+            persist()  // re-write JSON without inline fullText / with recovered entries
         }
+    }
+
+    /// IDs of recordings that were re-created from orphan .wav files at
+    /// launch — i.e. the app crashed (or was force-quit) mid-recording so
+    /// the audio file exists on disk but never made it into recordings.json.
+    /// `MilaApp` consumes this list once after init to auto-enqueue them
+    /// for transcription, then clears it.
+    private(set) var pendingRecoveryIDs: [UUID] = []
+
+    func consumePendingRecoveryIDs() -> [UUID] {
+        let ids = pendingRecoveryIDs
+        pendingRecoveryIDs = []
+        return ids
+    }
+
+    /// Crash recovery: scan the recordings directory for `.wav` files that
+    /// no Recording in the store points at. Each orphan was a recording in
+    /// progress when the app died — the audio is on disk (AVAudioFile
+    /// writes WAV frames incrementally), the metadata was never persisted.
+    /// Re-attach those files with `.pending` status so the user sees them
+    /// in the list and so the launch-time recovery sweep can enqueue them
+    /// for transcription. Returns the list of newly-added recordings so
+    /// the caller can decide whether to re-persist.
+    @discardableResult
+    private func recoverOrphanRecordings() -> [Recording] {
+        let referenced = Set(recordings.map { $0.audioFileName })
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: recordingsDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        var added: [Recording] = []
+        for url in entries where url.pathExtension.lowercased() == "wav" {
+            let name = url.lastPathComponent
+            if referenced.contains(name) { continue }
+            // Skip empty files — AVAudioFile creates the WAV header on
+            // open but a 44-byte placeholder isn't worth recovering.
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            if size < 512 { continue }
+            let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+            let recovered = Recording(
+                title: recoveryTitle(at: mtime),
+                createdAt: mtime,
+                duration: 0,  // filled in by the transcription path
+                source: .microphone,  // best guess; the original source isn't recoverable
+                audioFileName: name,
+                status: .pending
+            )
+            recordings.insert(recovered, at: 0)
+            added.append(recovered)
+            pendingRecoveryIDs.append(recovered.id)
+            print("RecordingStore: recovered orphan recording \(name) (\(size) bytes)")
+        }
+        if !added.isEmpty {
+            recordings.sort { $0.createdAt > $1.createdAt }
+        }
+        return added
+    }
+
+    private func recoveryTitle(at date: Date) -> String {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return "Recovered recording · \(f.string(from: date))"
     }
 
     private func persist() {

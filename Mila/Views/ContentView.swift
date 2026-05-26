@@ -10,12 +10,21 @@ struct ContentView: View {
     @EnvironmentObject private var modelManager: ModelManager
     @EnvironmentObject private var languageSettings: RecordingLanguageSettings
     @EnvironmentObject private var postRecording: PostRecordingCoordinator
+    @EnvironmentObject private var llmSettings: LLMSettings
+    @EnvironmentObject private var liveAISettings: LiveAISettings
 
     @State private var selection: SidebarSelection? = .home
     @State private var search: String = ""
+    /// Tracked so we can ping the AppKit chrome hack whenever the user
+    /// toggles the sidebar. Without this, the sidebar's
+    /// NSVisualEffectView is freshly added with default `.behindWindow`
+    /// blending and our "freeze to .withinWindow" hack — which only
+    /// runs on `didBecomeKeyNotification` — doesn't fire, producing
+    /// the brief flicker the user sees on sidebar reopen.
+    @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView(selection: $selection)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 320)
         } detail: {
@@ -29,7 +38,15 @@ struct ContentView: View {
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
 
-                if actions.isRecording {
+                // The floating RecordingChip used to be the only "you
+                // are recording" indicator. With the new always-on live
+                // recording view (which has its own header strip + a
+                // running timer in the corner), the chip would just
+                // double up the timer in the top-right corner AND hide
+                // part of the toolbar pickers underneath. Show the
+                // chip only when the user navigated away from the
+                // recording view (sidebar selection ≠ home).
+                if actions.isRecording, (selection ?? .home) != .home {
                     HStack {
                         Spacer()
                         RecordingChip()
@@ -43,8 +60,17 @@ struct ContentView: View {
                 ToolbarItem(placement: .primaryAction) {
                     InputDevicePickerToolbarItem()
                 }
-                ToolbarItem(placement: .primaryAction) {
-                    LanguagePickerToolbarItem()
+                // The language picker affects which whisper model the
+                // NEXT transcription uses. Changing it mid-recording
+                // doesn't switch models live and silently confuses
+                // users who think they can flip languages on the fly.
+                // Hide it during a recording — the input device
+                // picker stays because swapping mics mid-call is a
+                // legitimate operation.
+                if !actions.isRecording {
+                    ToolbarItem(placement: .primaryAction) {
+                        LanguagePickerToolbarItem()
+                    }
                 }
             }
         }
@@ -59,8 +85,41 @@ struct ContentView: View {
             message: { Text(transcription.lastError ?? "") }
         )
         .alert(
+            "Recording stopped because your Mac slept",
+            isPresented: Binding(
+                get: { actions.sleepInterruption != nil },
+                set: { if !$0 { actions.sleepInterruption = nil } }
+            ),
+            actions: {
+                if let info = actions.sleepInterruption {
+                    Button("Open recording") {
+                        selection = .recording(info.recordingID)
+                        actions.sleepInterruption = nil
+                    }
+                }
+                Button("OK", role: .cancel) {
+                    actions.sleepInterruption = nil
+                }
+            },
+            message: {
+                if let info = actions.sleepInterruption {
+                    Text(sleepInterruptionMessage(info))
+                } else {
+                    Text("")
+                }
+            }
+        )
+        .alert(
             "Microphone isn't picking up sound",
-            isPresented: $actions.noSoundWarningShown,
+            // Live AI mode renders a live transcript pane — if no text is
+            // appearing, the user can see that directly, so the modal
+            // "no sound" alert becomes redundant noise on top of an
+            // already-busy screen. Suppress it whenever the split-pane
+            // recording view is showing.
+            isPresented: Binding(
+                get: { actions.noSoundWarningShown && !isInLiveAIRecording },
+                set: { if !$0 { actions.noSoundWarningShown = false } }
+            ),
             actions: {
                 Button("Keep recording") {
                     actions.noSoundWarningShown = false
@@ -124,6 +183,47 @@ struct ContentView: View {
             }
         }
         .animation(.easeOut(duration: 0.2), value: postRecording.activityStatus)
+        .onChange(of: columnVisibility) { _, _ in
+            // Sidebar visibility changed — ping the AppDelegate so it
+            // re-applies the withinWindow blending on the (possibly
+            // freshly-recreated) NSVisualEffectViews inside the
+            // sidebar pane. Without this, opening the sidebar shows
+            // a frame or two of the default `behindWindow` material
+            // before our chrome hack catches up, which reads as a
+            // flicker.
+            NotificationCenter.default.post(name: .milaSidebarVisibilityDidChange, object: nil)
+        }
+    }
+
+    /// True iff the detail pane is currently rendering `LiveAIRecordingView`
+    /// — used to suppress alerts/banners that don't make sense when the
+    /// live transcript + action-items pane is doing its own UI.
+    private var isInLiveAIRecording: Bool {
+        (selection ?? .home) == .home
+            && actions.isRecording
+            && liveAISettings.enabled
+            && llmSettings.isConfigured
+    }
+
+    /// Compose the wake-up alert body. Always shows the captured length so
+    /// the user knows roughly how much audio is now waiting to transcribe.
+    /// On battery, adds a one-line "macOS does this on battery" hint —
+    /// the recording stopped because the OS forced sleep on lid close,
+    /// which apps can't override.
+    private func sleepInterruptionMessage(_ info: QuickActionsController.SleepInterruption) -> String {
+        let length = formatRecordingLength(info.durationSeconds)
+        var lines = ["Mila captured \(length) before your Mac went to sleep — the audio is saved and queued for transcription."]
+        if info.wasOnBattery {
+            lines.append("On battery, closing the lid forces sleep. macOS doesn't let apps override this; plug into power to keep recording with the lid closed.")
+        }
+        return lines.joined(separator: "\n\n")
+    }
+
+    private func formatRecordingLength(_ seconds: Double) -> String {
+        let total = Int(seconds.rounded())
+        let m = total / 60, s = total % 60
+        if m == 0 { return "\(s)s" }
+        return "\(m)m \(s)s"
     }
 
     private func activeDownloadProgress() -> Double? {
@@ -136,7 +236,22 @@ struct ContentView: View {
     private var detailContent: some View {
         switch selection ?? .home {
         case .home:
-            HomeView(selection: $selection, search: search)
+            if actions.isRecording || CommandLine.arguments.contains("--ui-test-rtl-live-hebrew") {
+                // Live transcription is always on during a recording —
+                // the AI summarization layer (action items / final
+                // summary) only activates when Live AI is enabled +
+                // a CLI is configured. The view itself handles the
+                // gating; we just route here based on "are we recording".
+                //
+                // The UI-test flag bypasses the recording requirement
+                // so a regression test can assert the layout of the
+                // live transcript pane (specifically Hebrew RTL
+                // alignment with the sidebar open) without driving a
+                // real audio recording.
+                LiveAIRecordingView()
+            } else {
+                HomeView(selection: $selection, search: search)
+            }
         case .queue:
             QueueView(selection: $selection)
         case .more:
@@ -156,6 +271,9 @@ struct ContentView: View {
                 // recording with the previous one's draft.
                 RecordingDetailView(recording: rec)
                     .id(rec.id)
+                    .onAppear {
+                        print("ContentView.detail: showing recording \(rec.id.uuidString.prefix(8)) status=\(rec.status) segs=\(rec.segments.count) summary=\(rec.summary?.isEmpty == false) items=\(rec.actionItems?.count ?? 0)")
+                    }
             } else {
                 ContentUnavailableView(
                     "Recording not found",

@@ -1,8 +1,11 @@
 import Foundation
 import AVFoundation
 import Combine
+import OSLog
 import ScreenCaptureKit
 import TranscriptionCore
+
+private let recLog = Logger(subsystem: "io.island.whisper.IslandWhisper", category: "RecordingSession")
 
 /// Orchestrates microphone + system audio capture into a single mono 16kHz WAV file.
 @MainActor
@@ -17,7 +20,12 @@ final class RecordingSession: ObservableObject {
     let system = SystemAudioRecorder()
 
     private(set) var source: RecordingSource = .microphone
-    private var fileURL: URL?
+    /// Path of the WAV currently being written. `nil` while idle. The live
+    /// streaming consumers (LiveSpeakerDiarizer) read partial frames out of
+    /// this file while we're still appending to it — safe because
+    /// `AVAudioFile` writes the WAV header on construction and frames are
+    /// appended without rewriting earlier bytes.
+    private(set) var fileURL: URL?
     private var audioFile: AVAudioFile?
     private var startTime: Date?
     private var timerTask: Task<Void, Never>?
@@ -29,8 +37,14 @@ final class RecordingSession: ObservableObject {
     private var pendingSystem: [Float] = []
     private let writeQueue = DispatchQueue(label: "io.island.mila.recording-write")
 
-    /// Captures full audio (post-mix) for live transcription.
-    private var liveSamples: [Float] = []
+    /// Fired with each post-mix sample chunk so the live transcriber
+    /// (and any other realtime consumer) can stream during recording.
+    /// We deliberately don't also retain a full-recording PCM buffer
+    /// here — `LiveTranscriber` keeps its own rolling window, and the
+    /// authoritative on-disk copy is the WAV we write per-chunk via
+    /// `writer`. (Earlier versions kept a duplicate `liveSamples`
+    /// array that was never read; removed in PR #20 after Bugbot
+    /// flagged the second full-length in-memory copy.)
     var onLiveSamples: ((ArraySlice<Float>) -> Void)?
 
     func refreshSystemAudioApps() async {
@@ -45,7 +59,7 @@ final class RecordingSession: ObservableObject {
         guard state == .idle else { return }
         self.source = source
         self.fileURL = outputURL
-        self.liveSamples.removeAll(keepingCapacity: true)
+        self.writesSinceStart = 0
 
         let format = WhisperAudioFormat.pcmFloat32
         let settings: [String: Any] = [
@@ -129,7 +143,6 @@ final class RecordingSession: ObservableObject {
         elapsed = 0
         pendingMic.removeAll(keepingCapacity: false)
         pendingSystem.removeAll(keepingCapacity: false)
-        liveSamples.removeAll(keepingCapacity: false)
         state = .idle
     }
 
@@ -183,8 +196,15 @@ final class RecordingSession: ObservableObject {
         await write(mixed)
     }
 
+    private var writesSinceStart: Int = 0
+
     private func write(_ samples: [Float]) async {
         guard let file = audioFile, !samples.isEmpty else { return }
+        writesSinceStart += 1
+        if writesSinceStart <= 3 || writesSinceStart % 50 == 0 {
+            let hasOnLive = onLiveSamples != nil
+            recLog.log("write #\(self.writesSinceStart) samples=\(samples.count) hasOnLiveCb=\(hasOnLive, privacy: .public)")
+        }
         let format = file.processingFormat
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format,
                                             frameCapacity: AVAudioFrameCount(samples.count)) else { return }
@@ -199,7 +219,6 @@ final class RecordingSession: ObservableObject {
         } catch {
             print("Audio file write error: \(error)")
         }
-        liveSamples.append(contentsOf: samples)
         if let onLive = onLiveSamples {
             onLive(samples[0..<samples.count])
         }

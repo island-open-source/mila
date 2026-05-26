@@ -10,6 +10,8 @@ struct HomeView: View {
     @EnvironmentObject private var actions: QuickActionsController
     @EnvironmentObject private var languageSettings: RecordingLanguageSettings
     @EnvironmentObject private var hotkeys: HotkeySettings
+    @EnvironmentObject private var liveAISettings: LiveAISettings
+    @EnvironmentObject private var llmSettings: LLMSettings
 
     @Binding var selection: SidebarSelection?
     let search: String
@@ -43,9 +45,22 @@ struct HomeView: View {
             HStack(alignment: .lastTextBaseline, spacing: 8) {
                 Text("Mila")
                     .font(.system(size: 36, weight: .semibold))
-                Text("by Island")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
+                HStack(alignment: .center, spacing: 4) {
+                    Text("by Island")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                    // Island brand mark. The asset is already grayscale
+                    // (two-tone — see IslandLogo.svg) so the horizon
+                    // line stays visible at 14×14. No `.saturation(0)`
+                    // — the previous color-and-desaturate combo
+                    // collapsed both gradients to the same mid-gray
+                    // and the circle looked like a flat disk.
+                    Image("IslandLogo")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 14, height: 14)
+                        .accessibilityHidden(true)
+                }
             }
             Text("Record, dictate, and transcribe locally on your Mac.")
                 .font(.title3)
@@ -61,7 +76,8 @@ struct HomeView: View {
             isRecording: isRecording,
             languageFlag: languageSettings.current.flagEmoji,
             languageName: languageSettings.current.displayName,
-            withSystemAudio: withSystemAudio
+            withSystemAudio: withSystemAudio,
+            liveAIEnabled: liveAISettings.enabled && llmSettings.isConfigured
         ) {
             Task { await actions.toggleRecord(withSystemAudio: withSystemAudio) }
         }
@@ -136,6 +152,11 @@ private struct HeroRecordButton: View {
     let languageFlag: String
     let languageName: String
     let withSystemAudio: Bool
+    /// True when Live AI mode is on AND a CLI is configured. Drives the
+    /// title ("Transcribe and Summarize" vs "Transcribe") and the small
+    /// sparkle on the mic icon — so the user can tell at a glance
+    /// whether pressing record will also fire the LLM loop.
+    let liveAIEnabled: Bool
     let action: () -> Void
 
     @State private var hovering = false
@@ -165,11 +186,26 @@ private struct HeroRecordButton: View {
                         Image(systemName: "mic.fill")
                             .font(.system(size: 22, weight: .bold))
                             .foregroundStyle(.primary.opacity(0.85))
+                        if liveAIEnabled {
+                            // Small sparkle nudged into the upper-right
+                            // corner of the icon circle to signal that
+                            // pressing record will also run the LLM
+                            // loop. The badge background matches the
+                            // app accent so it reads as "AI" without
+                            // needing a tooltip.
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(3)
+                                .background(Color.accentColor, in: Circle())
+                                .overlay(Circle().strokeBorder(Color.white.opacity(0.7), lineWidth: 1))
+                                .offset(x: 18, y: -18)
+                        }
                     }
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(isRecording ? "Recording…" : "Record")
+                    Text(titleText)
                         .font(.title2.weight(.semibold))
                         .foregroundStyle(textColor)
                     Text(captionText)
@@ -224,6 +260,11 @@ private struct HeroRecordButton: View {
             return Color.white.opacity(hovering ? 0.25 : 0.12)
         }
         return Color.primary.opacity(hovering ? 0.18 : 0.10)
+    }
+
+    private var titleText: String {
+        if isRecording { return "Recording…" }
+        return liveAIEnabled ? "Transcribe and Summarize" : "Transcribe"
     }
 
     private var captionText: String {

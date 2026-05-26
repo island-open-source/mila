@@ -274,7 +274,28 @@ private struct SidebarFooter: View {
     @State private var trashTargeted = false
 
     var body: some View {
+        // Settings sits ABOVE Trash now: the user expects Settings as
+        // the always-available system anchor (the typical macOS
+        // "left bottom" position for app settings) with Trash as a
+        // less-frequently-used row beneath it. The previous order
+        // (Trash on top, Settings on bottom) put the destructive row
+        // higher than the system row, which felt inverted.
         VStack(alignment: .leading, spacing: 4) {
+            SettingsLink {
+                HStack(spacing: 8) {
+                    Image(systemName: "gear")
+                        .frame(width: 18)
+                    Text("Settings")
+                        .font(.callout)
+                    Spacer()
+                }
+                .padding(.vertical, 4)
+                .padding(.horizontal, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+
             Button {
                 selection = .category(.recentlyDeleted)
             } label: {
@@ -316,21 +337,6 @@ private struct SidebarFooter: View {
                 }
                 return false
             } isTargeted: { trashTargeted = $0 }
-
-            SettingsLink {
-                HStack(spacing: 8) {
-                    Image(systemName: "gear")
-                        .frame(width: 18)
-                    Text("Settings")
-                        .font(.callout)
-                    Spacer()
-                }
-                .padding(.vertical, 4)
-                .padding(.horizontal, 6)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
         }
     }
 

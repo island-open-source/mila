@@ -39,13 +39,61 @@ enum LLMTool: String, CaseIterable, Identifiable, Codable {
     /// run bails with "Workspace Trust Required". We always pass it because
     /// the cwd is whatever launchd handed Mila, the user never
     /// sees it, and we're only asking the LLM to read a transcript.
-    func arguments(prompt: String) -> [String] {
+    ///
+    /// `model`, when non-empty, picks a specific model instead of the CLI's
+    /// default — used by Live AI mode to pin a cheap model (Haiku) for
+    /// the high-frequency action-item loop without changing the user's
+    /// global CLI default.
+    ///
+    /// `session`, when non-`.none`, attaches the invocation to a named
+    /// Claude conversation. Two modes:
+    ///   * `.new(uuid)` → pass `--session-id <uuid>`; claude CREATES the
+    ///     conversation. Reusing the same uuid later via `--session-id`
+    ///     fails with "Session ID is already in use."
+    ///   * `.resume(uuid)` → pass `--resume <uuid>`; claude continues
+    ///     an existing conversation with all prior turns + responses in
+    ///     scope.
+    ///
+    /// cursor-agent has no documented equivalent in `-p` mode and any
+    /// session value is silently ignored for that tool.
+    func arguments(prompt: String,
+                   model: String? = nil,
+                   session: LLMSession = .none) -> [String] {
+        let trimmedModel = model?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasModel = !(trimmedModel?.isEmpty ?? true)
         switch self {
         case .none:   return []
-        case .claude: return ["-p", prompt]
-        case .cursor: return ["-p", "-f", prompt]
+        case .claude:
+            var args: [String] = ["-p", prompt]
+            if hasModel, let m = trimmedModel {
+                args.append(contentsOf: ["--model", m])
+            }
+            switch session {
+            case .none:
+                break
+            case .new(let id):
+                args.append(contentsOf: ["--session-id", id.uuidString])
+            case .resume(let id):
+                args.append(contentsOf: ["--resume", id.uuidString])
+            }
+            return args
+        case .cursor:
+            var args: [String] = ["-p", "-f", prompt]
+            if hasModel, let m = trimmedModel {
+                args.append(contentsOf: ["--model", m])
+            }
+            // session intentionally ignored — see doc above.
+            return args
         }
     }
+}
+
+/// Stateful-conversation mode for the LLM CLI. See
+/// `LLMTool.arguments(prompt:model:session:)`.
+enum LLMSession: Equatable {
+    case none
+    case new(UUID)
+    case resume(UUID)
 }
 
 /// User-configurable prompts + tool selection for the LLM integration. The

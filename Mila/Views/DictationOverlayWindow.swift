@@ -10,7 +10,10 @@ final class DictationOverlayWindow {
     private var window: NSPanel?
     private let viewModel = DictationOverlayModel()
 
-    private static let panelSize = NSSize(width: 150, height: 44)
+    /// Slim pill while idle / no live text yet. Expands when the live
+    /// transcriber starts producing words so the user sees what's being
+    /// captured before they release the hotkey.
+    private static let panelSize = NSSize(width: 320, height: 64)
 
     func show() {
         if window == nil { createWindow() }
@@ -40,6 +43,23 @@ final class DictationOverlayWindow {
         withAnimation(.easeInOut(duration: 0.08)) {
             viewModel.level = max(0, min(1, value))
         }
+    }
+
+    /// Show the latest live-transcript text from `LiveTranscriber`. Empty
+    /// string collapses the text area so the overlay stays small until
+    /// there's something to display.
+    func updateLiveText(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        withAnimation(.easeInOut(duration: 0.15)) {
+            viewModel.liveText = trimmed
+        }
+    }
+
+    /// Tell the overlay which language the user is dictating in so the
+    /// live text strip can flip to RTL alignment for Hebrew (truncation
+    /// dots land on the right edge, matching reading direction).
+    func setLanguage(_ code: String) {
+        viewModel.language = code
     }
 
     func setBusy(_ busy: Bool) {
@@ -81,24 +101,33 @@ final class DictationOverlayWindow {
 final class DictationOverlayModel: ObservableObject {
     @Published var level: Float = 0
     @Published var busy: Bool = false
+    /// Latest live-transcript text. Empty means "show nothing" — the
+    /// overlay's text area collapses to zero height when this is empty
+    /// so the pill stays compact at the start of a dictation.
+    @Published var liveText: String = ""
+    /// Language of the current dictation. Drives RTL handling for the
+    /// live-text strip (Hebrew dictation places truncation dots on the
+    /// right, matching reading direction).
+    @Published var language: String = "en"
 }
 
 private struct DictationOverlayContent: View {
     @ObservedObject var viewModel: DictationOverlayModel
 
     private let pillColor = Color(red: 0.20, green: 0.55, blue: 0.95)
+    private var isRTL: Bool { viewModel.language == "he" }
 
     var body: some View {
-        ZStack {
-            Capsule(style: .continuous)
-                .fill(pillColor)
-                .shadow(color: .black.opacity(0.25), radius: 6, x: 0, y: 2)
-                .overlay(
-                    Capsule(style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5)
-                )
+        VStack(spacing: 6) {
+            ZStack {
+                Capsule(style: .continuous)
+                    .fill(pillColor)
+                    .shadow(color: .black.opacity(0.25), radius: 6, x: 0, y: 2)
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5)
+                    )
 
-            Group {
                 if viewModel.busy {
                     ProgressView()
                         .progressViewStyle(.circular)
@@ -110,9 +139,27 @@ private struct DictationOverlayContent: View {
                         .transition(.opacity)
                 }
             }
+            .frame(width: 150, height: 36)
+
+            if !viewModel.liveText.isEmpty {
+                Text(viewModel.liveText)
+                    .font(.callout)
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .truncationMode(.head)
+                    .multilineTextAlignment(isRTL ? .trailing : .leading)
+                    .frame(maxWidth: 300, alignment: isRTL ? .trailing : .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Color.black.opacity(0.55),
+                                in: RoundedRectangle(cornerRadius: 8))
+                    .environment(\.layoutDirection, isRTL ? .rightToLeft : .leftToRight)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
-        .padding(4)
-        .frame(width: 150, height: 44)
+        .padding(.top, 4)
+        .padding(.horizontal, 6)
+        .frame(width: 320, alignment: .center)
     }
 }
 

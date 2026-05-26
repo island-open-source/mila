@@ -58,6 +58,15 @@ struct Recording: Identifiable, Codable, Hashable {
     /// microphone-only or system-wide system-audio captures.
     var appName: String?
 
+    /// Rolling Live-AI summary captured at the moment recording stopped.
+    /// nil for any recording that ran without Live AI mode active.
+    var summary: String?
+
+    /// Action items surfaced by Live AI during the recording. nil when
+    /// Live AI wasn't running; an empty array means it ran but produced
+    /// nothing (rare — usually means the LLM CLI returned an error).
+    var actionItems: [ActionItem]?
+
     init(id: UUID = UUID(),
          title: String,
          createdAt: Date = Date(),
@@ -71,7 +80,9 @@ struct Recording: Identifiable, Codable, Hashable {
          fullText: String = "",
          deletedAt: Date? = nil,
          folder: String? = nil,
-         appName: String? = nil) {
+         appName: String? = nil,
+         summary: String? = nil,
+         actionItems: [ActionItem]? = nil) {
         self.id = id
         self.title = title
         self.createdAt = createdAt
@@ -86,6 +97,8 @@ struct Recording: Identifiable, Codable, Hashable {
         self.deletedAt = deletedAt
         self.folder = folder
         self.appName = appName
+        self.summary = summary
+        self.actionItems = actionItems
     }
 
     var isTrashed: Bool { deletedAt != nil }
@@ -99,7 +112,8 @@ struct Recording: Identifiable, Codable, Hashable {
 
     private enum CodingKeys: String, CodingKey {
         case id, title, createdAt, duration, source, audioFileName,
-             status, language, modelName, segments, deletedAt, folder, appName
+             status, language, modelName, segments, deletedAt, folder, appName,
+             summary, actionItems
         // `fullText` deliberately excluded — lives in a sidecar .txt file.
         // Legacy records that had it inline are decoded via the custom init.
         case fullText
@@ -120,6 +134,8 @@ struct Recording: Identifiable, Codable, Hashable {
         self.deletedAt = try c.decodeIfPresent(Date.self, forKey: .deletedAt)
         self.folder = try c.decodeIfPresent(String.self, forKey: .folder)
         self.appName = try c.decodeIfPresent(String.self, forKey: .appName)
+        self.summary = try c.decodeIfPresent(String.self, forKey: .summary)
+        self.actionItems = try c.decodeIfPresent([ActionItem].self, forKey: .actionItems)
         // Legacy records still have fullText inline; new records leave it
         // empty here and RecordingStore loads it from the sidecar .txt.
         self.fullText = try c.decodeIfPresent(String.self, forKey: .fullText) ?? ""
@@ -140,6 +156,8 @@ struct Recording: Identifiable, Codable, Hashable {
         try c.encodeIfPresent(deletedAt, forKey: .deletedAt)
         try c.encodeIfPresent(folder, forKey: .folder)
         try c.encodeIfPresent(appName, forKey: .appName)
+        try c.encodeIfPresent(summary, forKey: .summary)
+        try c.encodeIfPresent(actionItems, forKey: .actionItems)
         // fullText intentionally omitted — sidecar .txt is the source of truth.
     }
 

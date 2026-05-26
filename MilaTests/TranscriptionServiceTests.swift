@@ -454,4 +454,52 @@ final class TranscriptionServiceTests: XCTestCase {
         XCTAssertEqual(stored.language, "en")
         XCTAssertEqual(stored.status, .completed)
     }
+
+    // MARK: - Speaker label normalization
+
+    func test_normalizeSpeakerLabels_closes_gaps_from_diarizer_clustering() {
+        // Pyannote occasionally emits non-contiguous speaker ids
+        // (SPEAKER_00 and SPEAKER_02 with no SPEAKER_01) when its
+        // clustering pass merges an intermediate cluster. The UI
+        // would otherwise show "Speaker A, Speaker C" with no B.
+        let segments: [TranscriptSegment] = [
+            .init(start: 0, end: 1, text: "hi", speaker: "SPEAKER_00"),
+            .init(start: 1, end: 2, text: "yo", speaker: "SPEAKER_02"),
+            .init(start: 2, end: 3, text: "ya", speaker: "SPEAKER_00"),
+            .init(start: 3, end: 4, text: "bye", speaker: "SPEAKER_02"),
+        ]
+        let normalized = TranscriptionService.normalizeSpeakerLabels(in: segments)
+        XCTAssertEqual(normalized.map(\.speaker),
+                       ["SPEAKER_00", "SPEAKER_01", "SPEAKER_00", "SPEAKER_01"])
+    }
+
+    func test_normalizeSpeakerLabels_uses_first_appearance_order() {
+        // The user who SPEAKS FIRST always ends up as SPEAKER_00,
+        // regardless of what id pyannote happened to assign.
+        let segments: [TranscriptSegment] = [
+            .init(start: 0, end: 1, text: "first speaker", speaker: "SPEAKER_05"),
+            .init(start: 1, end: 2, text: "second speaker", speaker: "SPEAKER_01"),
+            .init(start: 2, end: 3, text: "third speaker", speaker: "SPEAKER_03"),
+            .init(start: 3, end: 4, text: "first again", speaker: "SPEAKER_05"),
+        ]
+        let normalized = TranscriptionService.normalizeSpeakerLabels(in: segments)
+        XCTAssertEqual(normalized.map(\.speaker),
+                       ["SPEAKER_00", "SPEAKER_01", "SPEAKER_02", "SPEAKER_00"])
+    }
+
+    func test_normalizeSpeakerLabels_passes_through_segments_without_labels() {
+        // Mixed: some segments have speakers, some don't (e.g.
+        // background noise the diarizer couldn't attribute). The
+        // unlabeled segments stay unlabeled; only the labeled ones
+        // get renumbered.
+        let segments: [TranscriptSegment] = [
+            .init(start: 0, end: 1, text: "a", speaker: "SPEAKER_03"),
+            .init(start: 1, end: 2, text: "b", speaker: nil),
+            .init(start: 2, end: 3, text: "c", speaker: "SPEAKER_07"),
+        ]
+        let normalized = TranscriptionService.normalizeSpeakerLabels(in: segments)
+        XCTAssertEqual(normalized[0].speaker, "SPEAKER_00")
+        XCTAssertNil(normalized[1].speaker)
+        XCTAssertEqual(normalized[2].speaker, "SPEAKER_01")
+    }
 }

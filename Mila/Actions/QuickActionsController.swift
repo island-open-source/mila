@@ -42,6 +42,32 @@ final class QuickActionsController: ObservableObject {
     /// new app and the user has to re-grant access.
     @Published var microphonePermissionMissing = false
 
+    /// Populated when a recording was force-stopped because the Mac went
+    /// to sleep (lid close on battery, low-battery sleep, etc.). Surfaced
+    /// to ContentView as an alert on the next wake so the user knows why
+    /// the recording ended where it did. Cleared when the user dismisses.
+    @Published var sleepInterruption: SleepInterruption?
+
+    struct SleepInterruption: Equatable {
+        let recordingID: UUID
+        let title: String
+        let durationSeconds: Double
+        let wasOnBattery: Bool
+    }
+
+    /// Holds an IOPMAssertion while a recording is active so the Mac
+    /// doesn't doze off mid-meeting. Released on stop / app teardown.
+    private let sleepGuard = SleepGuard()
+
+    /// Captured at the start of `stopRecording` when the stop was forced
+    /// by an impending system sleep — read by the post-stop code so the
+    /// finalized recording can be surfaced in the wake-up alert.
+    private var pendingSleepStopReason: SleepStopReason?
+
+    private enum SleepStopReason {
+        case willSleep
+    }
+
     /// Silence-watch tunables — exposed on the type so tests can override
     /// (we don't want the test suite to sleep for 10 seconds).
     var silenceWatchSeconds: TimeInterval = 10
@@ -56,6 +82,17 @@ final class QuickActionsController: ObservableObject {
     let transcription: TranscriptionService
     let languageSettings: RecordingLanguageSettings
     let postRecording: PostRecordingCoordinator
+
+    /// Late-bound by `MilaApp` after construction so the controller can
+    /// decide at stop time whether Live AI was active for the current
+    /// recording. Init-time injection would create a chicken-and-egg
+    /// problem because `LiveAISession` itself depends on `LLMSettings`
+    /// (already constructed before `actions`) but its own state lives
+    /// downstream of the controller. Optionals keep tests + the legacy
+    /// dictation-only setup working without these dependencies.
+    var llmSettings: LLMSettings?
+    var liveAISettings: LiveAISettings?
+    var liveAISession: LiveAISession?
 
     /// Active silence-watch task — cancelled when the recording stops so
     /// we never fire the warning for a recording that's already over.
@@ -116,6 +153,7 @@ final class QuickActionsController: ObservableObject {
         do {
             try await session.start(source: source, outputURL: url)
             activeJob = .recording(withSystemAudio: withSystemAudio)
+            sleepGuard.preventIdleSleep(reason: "Mila is recording")
             startSilenceWatch(watching: source)
         } catch SystemAudioRecorder.CaptureError.permissionDenied {
             screenRecordingPermissionMissing = true
@@ -193,6 +231,7 @@ final class QuickActionsController: ObservableObject {
             let source: RecordingSource = includeMic ? .meeting : .systemAudio
             try await session.start(source: source, outputURL: url)
             activeJob = .recordingApp(processID: app?.processID, includeMic: includeMic)
+            sleepGuard.preventIdleSleep(reason: "Mila is recording")
             startSilenceWatch(watching: source)
         } catch SystemAudioRecorder.CaptureError.permissionDenied {
             screenRecordingPermissionMissing = true
@@ -217,11 +256,17 @@ final class QuickActionsController: ObservableObject {
     func stopRecording() async {
         let captured = activeJob
         let durationBeforeStop = session.elapsed
+        let sleepReason = pendingSleepStopReason
+        pendingSleepStopReason = nil
         // Always cancel the silence-watch BEFORE the engine teardown so a
         // late-arriving "no sound" warning doesn't fire on a recording the
         // user already stopped (especially common for sub-10s recordings).
         silenceWatchTask?.cancel()
         silenceWatchTask = nil
+        // Release the sleep assertion as soon as the engine is shutting
+        // down — keeping it past `stop()` would block idle sleep while
+        // the user is just looking at the rename sheet.
+        sleepGuard.allowIdleSleep()
         guard let outputURL = await session.stop() else {
             activeJob = .none
             return
@@ -250,23 +295,91 @@ final class QuickActionsController: ObservableObject {
             }
         }()
 
+        // Capture any Live-AI output that accumulated during this
+        // recording so it ships with the saved Recording. We key off
+        // "did the LLM session actually produce anything?" rather
+        // than the current toggle state — a user who flips Live AI
+        // off RIGHT before pressing Stop shouldn't lose the summary
+        // and action items that already accumulated during the run.
+        //
+        // Drain any in-flight or pending LLM tick FIRST: the
+        // wireLiveAIPipeline's `.idle` handler runs concurrently with
+        // this method and fires one last `feed()` to flush the
+        // recording's tail. If we read `.summary` before that tick
+        // completes, the saved Recording misses the final update.
+        await liveAISession?.awaitFinalTick()
+        let liveSummary = (liveAISession?.summary ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let liveItems = liveAISession?.actionItems ?? []
+        let liveAIWasActive = !liveSummary.isEmpty || !liveItems.isEmpty
+
         let recording = Recording(
             title: title,
             duration: duration,
             source: source,
             audioFileName: outputURL.lastPathComponent,
             language: languageSettings.current.rawValue,
-            appName: appName
+            appName: appName,
+            summary: liveSummary.isEmpty ? nil : liveSummary,
+            actionItems: liveItems.isEmpty ? nil : liveItems
         )
         store.add(recording)
         activeJob = .none
+        if sleepReason != nil {
+            // A wake-time alert (raised by `notifySleepInterrupted`) needs
+            // the recording's finalized metadata. Stash it now; the
+            // notification handler picks it up after `didWake` fires.
+            sleepInterruption = SleepInterruption(
+                recordingID: recording.id,
+                title: recording.title,
+                durationSeconds: duration,
+                wasOnBattery: !SleepGuard.isOnACPower()
+            )
+        }
         // Open the rename sheet immediately, in parallel with transcription.
         // The sheet watches the store for the transcript to land and
         // enables LLM-suggest / Send-to-Claude once it's ready. Dictations
         // and imported files deliberately skip this — naming a 3-second
         // dictation would be more friction than the auto-title is worth.
-        postRecording.present(recording)
+        // Suppress in two more cases:
+        //   * The stop was forced by sleep — the user isn't at the
+        //     machine; stacking a modal behind the wake-up alert would
+        //     force them to dismiss two prompts in a row.
+        //   * Live AI was running — the split-pane already gave the user
+        //     a summary, action items, and a live transcript while the
+        //     call was happening, so re-prompting for a title on top
+        //     would be busywork. They can still rename via the detail
+        //     view if the default timestamped title isn't enough.
+        if sleepReason == nil, !liveAIWasActive {
+            postRecording.present(recording)
+        }
         transcription.enqueue(recording)
+    }
+
+    // MARK: - Sleep interruption
+
+    /// Called by `MilaAppDelegate` when macOS posts `willSleepNotification`
+    /// while a recording is active. We have a small budget (~1–2 s) before
+    /// the system actually sleeps, so we mark the stop reason and await
+    /// the normal stop pipeline. The wake-up alert is populated by
+    /// `stopRecording` once the recording lands in the store.
+    func stopBecauseOfSleep() async {
+        guard isRecording else { return }
+        pendingSleepStopReason = .willSleep
+        await stopRecording()
+    }
+
+    /// Called by `MilaAppDelegate` on `didWakeNotification`. No-op when
+    /// `sleepInterruption` is nil (the recording wasn't ours to stop, or
+    /// the user already dismissed the previous wake alert).
+    func notifyDidWake() {
+        // The published `sleepInterruption` is what drives the ContentView
+        // alert — we just need to trigger SwiftUI to observe it. Re-assign
+        // to the same value so any view binding wakes up if it was
+        // already nil-checked at app suspension time.
+        if let info = sleepInterruption {
+            sleepInterruption = info
+        }
     }
 
     // MARK: - Open files
@@ -348,29 +461,21 @@ final class QuickActionsController: ObservableObject {
     /// `session.systemLevel`; a meeting watches whichever is louder so
     /// one quiet side doesn't false-positive the whole recording.
     private func startSilenceWatch(watching source: RecordingSource) {
+        // The live-transcript pane is now the always-on visual
+        // indicator that the mic is working — empty pane = nothing
+        // being heard. The modal "microphone too quiet" alert that
+        // used to compensate for the lack of feedback is fully
+        // redundant and would just nag users who are listening more
+        // than they're speaking (e.g. a meeting where the other side
+        // is talking).
+        //
+        // Kept as a no-op (rather than deleted) so the call sites in
+        // `startRecording` / `startAppRecording` don't need to change
+        // and the static `silenceWatch(...)` helper remains available
+        // for unit tests.
+        _ = source
         silenceWatchTask?.cancel()
-        let totalSeconds = silenceWatchSeconds
-        let threshold = silenceWatchLevelThreshold
-        let sourceCopy = source
-        silenceWatchTask = Task { @MainActor [weak self] in
-            let silent = await Self.silenceWatch(
-                totalSeconds: totalSeconds,
-                threshold: threshold,
-                levelProvider: { [weak self] in
-                    guard let self else { return 0 }
-                    switch sourceCopy {
-                    case .microphone:  return self.session.micLevel
-                    case .systemAudio: return self.session.systemLevel
-                    case .meeting:     return max(self.session.micLevel, self.session.systemLevel)
-                    }
-                }
-            )
-            guard let self else { return }
-            // Only warn if we're still actually recording — covers the case
-            // where stop() was racing with the final poll iteration.
-            guard silent, !Task.isCancelled, self.isRecording else { return }
-            self.noSoundWarningShown = true
-        }
+        silenceWatchTask = nil
     }
 
     /// Standalone watch loop. Returns true if the entire `totalSeconds`

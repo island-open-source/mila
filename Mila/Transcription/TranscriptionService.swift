@@ -87,21 +87,30 @@ final class TranscriptionService: ObservableObject {
     /// language-best model isn't installed yet (download still in flight),
     /// we fall back to whatever's selected so the user gets *some* transcript.
     func transcribeOnce(samples: [Float], language: String) async -> String {
+        let segs = await transcribeOnceSegments(samples: samples, language: language)
+        return segs.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Same as `transcribeOnce`, but returns whisper's timed segments
+    /// instead of a concatenated string. Used by `LiveTranscriber` so it
+    /// can keep per-segment timing through the live loop (required for
+    /// rendering one line per utterance and for matching speakers to
+    /// segments by time).
+    func transcribeOnceSegments(samples: [Float], language: String) async -> [TranscriptSegment] {
         guard let model = modelManager.model(for: language),
               modelManager.isInstalled(model) else {
-            return ""
+            return []
         }
         do {
             try await engine.loadIfNeeded(modelURL: modelManager.url(for: model),
                                           displayName: model.displayName)
-            let segs = try await engine.transcribe(samples: samples,
-                                                   language: language,
-                                                   progress: nil,
-                                                   isCancelled: nil)
-            return segs.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+            return try await engine.transcribe(samples: samples,
+                                               language: language,
+                                               progress: nil,
+                                               isCancelled: nil)
         } catch {
             print("Dictation transcription error: \(error)")
-            return ""
+            return []
         }
     }
 
@@ -220,12 +229,19 @@ final class TranscriptionService: ObservableObject {
             // confident-looking transcript — that's the "every empty
             // recording got the same Hebrew test phrase" bug.
             if durationSeconds < Self.minimumAudioDurationSeconds || peak < Self.minimumAudioPeak {
+                // Silently mark the recording failed instead of popping a
+                // modal alert. Queue-driven transcription runs in the
+                // background (post-record, crash recovery on launch,
+                // re-transcribe button) — at none of those moments does
+                // the user want a popup interrupting them. The .failed
+                // status in the list is enough self-serve signal; the
+                // detail view shows "No transcript yet" + a Transcribe
+                // button if the user wants to retry on a noisier mic.
                 print("Transcribe: rejecting \(working.title) — too short or too quiet to be real speech")
                 working.status = .failed
                 working.fullText = ""
                 working.segments = []
                 store.update(working)
-                lastError = "Recording is too quiet or too short to transcribe. Check your microphone."
                 return
             }
 
@@ -292,6 +308,18 @@ final class TranscriptionService: ObservableObject {
                         turns: speakerTurns
                     )
                 }
+                // Normalize speaker labels to be sequential by first
+                // appearance. Pyannote's clustering can yield gaps
+                // (SPEAKER_00 then SPEAKER_02) when intermediate
+                // clusters are merged away — which then shows up as
+                // "Speaker A" + "Speaker C" with no B. Friendlier to
+                // re-key everything as 00, 01, 02… in transcript order.
+                enrichedSegments = Self.normalizeSpeakerLabels(in: enrichedSegments)
+                let labeled = enrichedSegments.compactMap(\.speaker).count
+                let distinct = Set(enrichedSegments.compactMap(\.speaker)).count
+                print("Transcribe: applied speaker labels — \(labeled)/\(enrichedSegments.count) segments labeled, \(distinct) distinct speakers")
+            } else {
+                print("Transcribe: NO speaker labels — shouldDiarize=\(shouldDiarize), speakerTurns.count=0. Either diarization is not configured, returned no turns, or the pyannote subprocess failed (check stderr above).")
             }
 
             let text = enrichedSegments.map(\.text)
@@ -323,6 +351,33 @@ final class TranscriptionService: ObservableObject {
             store.update(working)
             lastError = "Transcription failed: \(error.localizedDescription)"
         }
+    }
+
+    /// Re-key speaker labels in transcript order so the SET of labels
+    /// is contiguous `SPEAKER_00`, `SPEAKER_01`, … with no gaps. The
+    /// diarizer can return `{SPEAKER_00, SPEAKER_02}` when an
+    /// intermediate cluster got merged by the clustering pipeline —
+    /// without this the UI would show "Speaker A, Speaker C" with no
+    /// B in between, which is confusing.
+    ///
+    /// First-appearance order is preferred over alphabetical so the
+    /// person who spoke first is always `SPEAKER_00`.
+    static func normalizeSpeakerLabels(in segments: [TranscriptSegment]) -> [TranscriptSegment] {
+        var mapping: [String: String] = [:]
+        var nextIndex = 0
+        var output = segments
+        for i in output.indices {
+            guard let original = output[i].speaker, !original.isEmpty else { continue }
+            if let remapped = mapping[original] {
+                output[i].speaker = remapped
+            } else {
+                let remapped = String(format: "SPEAKER_%02d", nextIndex)
+                mapping[original] = remapped
+                output[i].speaker = remapped
+                nextIndex += 1
+            }
+        }
+        return output
     }
 
     private func markFailed(_ recording: Recording) {

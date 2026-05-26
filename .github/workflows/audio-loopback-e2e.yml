@@ -1,0 +1,132 @@
+name: Audio Loopback E2E
+
+# Real-audio loopback test. Plays a synthesised WAV through BlackHole
+# (a virtual audio device set as the macOS default input), then drives
+# Mila through Record → Stop via XCUITest, and asserts live segments
+# actually appear in the live transcript pane.
+#
+# Catches regressions in the audio capture wiring that mock-based unit
+# tests miss — specifically the `RecordingSession.onLiveSamples →
+# LiveTranscriber.ingest` seam where a real production bug ("nothing
+# transcribed live") slipped through the existing suite in PR #20.
+#
+# Cadence: nightly + workflow_dispatch. NOT on every push — the run is
+# ~10 min on macos-26 (BlackHole install + TCC manipulation + full app
+# build + 30s of real whisper inference).
+
+on:
+  schedule:
+    # 03:00 UTC daily — outside US/EU work hours, before morning standup.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  audio-loopback:
+    name: Real audio capture E2E
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install BlackHole + switchaudio-osx
+        run: |
+          # BlackHole is a virtual audio loopback device. switchaudio-osx
+          # lets us flip the system's default input from the CLI.
+          brew install blackhole-2ch switchaudio-osx
+
+      - name: Grant microphone TCC to host app AND test runner
+        # macOS gates microphone access via TCC. On a fresh runner the
+        # first capture fires an interactive prompt that CI can't
+        # dismiss. The mic access happens INSIDE the host app
+        # (`io.island.whisper.IslandWhisper`) — granting only the
+        # `.xctrunner` bundle isn't enough. Pre-grant both. Ignore the
+        # sqlite "unsafe to write outside transaction" warning — that's
+        # TCC.db's WAL doing its job.
+        run: |
+          TCC_DB="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
+          for client in \
+              "io.island.whisper.IslandWhisper" \
+              "io.island.whisper.IslandWhisperUITests.xctrunner"; do
+            sqlite3 "$TCC_DB" \
+              "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceMicrophone', '$client', 0, 2, 4, 1, 'UNUSED', 0, strftime('%s','now'));" \
+              || echo "::warning::TCC pre-grant for $client failed — first run may need manual prompt"
+          done
+
+      - name: Route audio through BlackHole (both directions)
+        # BlackHole is a loopback device — audio rendered to its OUTPUT
+        # appears on its INPUT. Setting BlackHole as the default OUTPUT
+        # lets the fixture's afplay (which targets default output)
+        # actually feed the loopback; setting it as the default INPUT
+        # lets Mila pick it up via AVAudioEngine's default mic. Without
+        # both, the fixture renders to a real speaker that Mila can't
+        # see.
+        run: |
+          SwitchAudioSource -t input  -s "BlackHole 2ch"
+          SwitchAudioSource -t output -s "BlackHole 2ch"
+          SwitchAudioSource -c -t input
+          SwitchAudioSource -c -t output
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Cache diarization bundle
+        id: diar-bundle-cache
+        uses: actions/cache@v4
+        with:
+          path: Mila/Resources/PythonRuntime
+          key: diar-bundle-${{ runner.os }}-${{ hashFiles('scripts/build-diarization-bundle.sh') }}
+
+      - name: Build diarization bundle (cold path only)
+        if: steps.diar-bundle-cache.outputs.cache-hit != 'true'
+        run: make bundle-diarization
+
+      - name: Generate Xcode project
+        run: make project
+
+      - name: Generate audio fixture
+        run: ./scripts/generate-audio-fixture.sh /tmp/mila-loopback-fixture.wav
+
+      - name: Start audio playback (background)
+        # Loop the fixture so it keeps feeding BlackHole for the entire
+        # test window. With BlackHole now the default OUTPUT,
+        # plain `afplay` lands on the loopback (no `-d` flag needed —
+        # and avoids any ambiguity over device UID vs name).
+        # Background process; the test step kills it via the
+        # `kill` step below.
+        run: |
+          (while true; do afplay /tmp/mila-loopback-fixture.wav; done) &
+          echo $! > /tmp/afplay.pid
+          # Small head start so audio is already flowing when the
+          # XCUITest taps Record.
+          sleep 2
+
+      - name: Run audio loopback UI test
+        env:
+          MILA_LOOPBACK_E2E: "1"
+        run: |
+          xcodebuild test \
+            -project Mila.xcodeproj \
+            -scheme Mila \
+            -destination 'platform=macOS' \
+            -only-testing:MilaUITests/AudioLoopbackUITests \
+            -derivedDataPath build-uitests \
+            CODE_SIGNING_ALLOWED=NO \
+            -resultBundlePath build-uitests/loopback.xcresult
+
+      - name: Stop audio playback
+        if: always()
+        run: |
+          if [ -f /tmp/afplay.pid ]; then
+            pkill -P "$(cat /tmp/afplay.pid)" 2>/dev/null || true
+            kill "$(cat /tmp/afplay.pid)" 2>/dev/null || true
+          fi
+          pkill -f afplay || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: loopback-xcresult
+          path: build-uitests/loopback.xcresult
+          if-no-files-found: warn

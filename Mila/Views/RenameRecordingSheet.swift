@@ -19,6 +19,12 @@ struct RenameRecordingSheet: View {
     /// One-shot guard so the auto-suggest doesn't re-fire every time the
     /// store publishes (transcript edits, status flips, etc.).
     @State private var didAutoSuggest = false
+    /// Confirmation gate before the destructive Discard button actually
+    /// throws the recording away. Closing the sheet (ESC, X, app quit)
+    /// always saves — discarding requires an explicit click + confirm,
+    /// because the user's mental model is "I just recorded something,
+    /// don't lose it."
+    @State private var confirmingDiscard = false
     /// Persists the user's "show prompts" preference across sheet sessions.
     /// Most people glance at the prompt once and then collapse it; we
     /// remember that choice so the disclosure doesn't snap open every time
@@ -106,13 +112,20 @@ struct RenameRecordingSheet: View {
             }
 
             HStack {
+                // Destructive opt-out: throws the recording away entirely
+                // (and any in-flight LLM call + active whisper
+                // transcription). Gated behind a confirm because the
+                // previous "Cancel" copy was hit accidentally — losing
+                // a just-finished recording was the #1 user complaint.
+                // ESC no longer triggers this (we route ESC -> save
+                // below); the user must click and confirm.
+                Button(role: .destructive) {
+                    confirmingDiscard = true
+                } label: {
+                    Text("Discard")
+                }
+                .help("Permanently delete this recording and stop transcribing it")
                 Spacer()
-                // Cancel = throw the recording away entirely (and any
-                // in-flight LLM call + active whisper transcription). See
-                // PostRecordingCoordinator.cancelAndDiscard for the full
-                // teardown.
-                Button("Cancel") { coordinator.cancelAndDiscard() }
-                    .keyboardShortcut(.cancelAction)
                 if llm.isConfigured && llm.postActionEnabled {
                     Button("Save") { save() }
                     Button("Send to \(llm.tool.displayName)") { saveAndSend() }
@@ -131,8 +144,23 @@ struct RenameRecordingSheet: View {
         }
         .padding(20)
         .frame(width: 480)
+        // ESC = save and close. Without this, ESC has no binding and the
+        // sheet stays modal until the user clicks. We deliberately do NOT
+        // bind ESC to Discard — the whole point of this change is that
+        // dismissing the sheet must never throw audio away.
+        .onExitCommand { save() }
         .onAppear { triggerAutoSuggestIfReady() }
         .onChange(of: liveRecording.status) { _, _ in triggerAutoSuggestIfReady() }
+        .confirmationDialog("Discard this recording?",
+                            isPresented: $confirmingDiscard,
+                            titleVisibility: .visible) {
+            Button("Discard", role: .destructive) {
+                coordinator.cancelAndDiscard()
+            }
+            Button("Keep", role: .cancel) { }
+        } message: {
+            Text("The audio file and any transcript will be permanently deleted.")
+        }
     }
 
     /// Auto-fire the LLM Suggest call as soon as the transcript is ready,
