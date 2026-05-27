@@ -160,12 +160,50 @@ final class LiveTranscriber: ObservableObject {
     /// still calls this — keep as a no-op.
     func finalizeAllSegments() {}
 
-    /// No-op in the cumulative model. Live speaker labels can't attach
-    /// to a flat text stream without per-character timing. The full
-    /// pyannote pass after the recording stops is what produces the
-    /// saved transcript's speaker labels in the detail view.
+    /// Attach speaker labels to live segments by matching each
+    /// segment's `[startSeconds, endSeconds]` against the diarizer's
+    /// running intervals. The interval with the largest temporal
+    /// overlap wins.
+    ///
+    /// Already-labelled segments are skipped — once we've committed a
+    /// speaker to a segment we keep it stable in the UI rather than
+    /// re-flipping it as more intervals arrive. The diarizer-output
+    /// model produces stable speaker IDs once a voice profile is seen
+    /// twice, so the early match for a segment is almost always
+    /// correct; the cost of keeping it stable is a marginal accuracy
+    /// gain we'd otherwise get by re-evaluating.
+    ///
+    /// Cost: O(unlabelled_segments × intervals). At a 2 min recording
+    /// with one utterance per 500 ms and one diarizer interval per
+    /// 500 ms, that's 240 × 240 = 57 600 cheap arithmetic ops per
+    /// call — well under 1 ms on Apple Silicon. The caching keeps
+    /// the typical-tick cost proportional to the NEW utterances
+    /// since the last tick (usually 1-2 segments) × all intervals.
     func applySpeakerLabels(_ intervals: [(start: Double, end: Double, speaker: String)]) {
-        _ = intervals
+        guard !intervals.isEmpty, !segments.isEmpty else { return }
+        var copy = segments
+        var changed = false
+        for i in 0..<copy.count {
+            if copy[i].speaker != nil { continue }
+            let segStart = copy[i].startSeconds
+            let segEnd = copy[i].endSeconds
+            var bestOverlap: Double = 0
+            var bestSpeaker: String? = nil
+            for iv in intervals {
+                let overlap = min(segEnd, iv.end) - max(segStart, iv.start)
+                if overlap > bestOverlap {
+                    bestOverlap = overlap
+                    bestSpeaker = iv.speaker
+                }
+            }
+            if let bestSpeaker {
+                copy[i].speaker = bestSpeaker
+                changed = true
+            }
+        }
+        if changed {
+            segments = copy
+        }
     }
 
     /// Used by `LiveAISession` as the LLM-feed format. Newline-separated
