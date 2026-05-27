@@ -42,10 +42,11 @@ final class UtteranceDetectorTests: XCTestCase {
             captured = (samples, start)
         }
 
-        // 1s silence, then 2s of speech, then 600ms of trailing silence.
+        // 1s silence, then 2s of speech, then 900ms of trailing silence
+        // (default silenceMs threshold is 700ms).
         det.ingest(silence(seconds: 1.0)[...])
         det.ingest(speech(seconds: 2.0)[...])
-        det.ingest(silence(seconds: 0.6)[...])
+        det.ingest(silence(seconds: 0.9)[...])
 
         XCTAssertNotNil(captured, "Expected an emitted utterance after silence followed speech")
         guard let captured else { return }
@@ -68,9 +69,9 @@ final class UtteranceDetectorTests: XCTestCase {
 
         det.ingest(silence(seconds: 0.5)[...])
         det.ingest(speech(seconds: 1.5)[...])
-        det.ingest(silence(seconds: 0.6)[...])   // pause > 400ms ends 1st
+        det.ingest(silence(seconds: 0.9)[...])   // pause > 700ms ends 1st
         det.ingest(speech(seconds: 1.0)[...])
-        det.ingest(silence(seconds: 0.6)[...])   // pause ends 2nd
+        det.ingest(silence(seconds: 0.9)[...])   // pause ends 2nd
 
         XCTAssertEqual(fired, 2)
     }

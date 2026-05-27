@@ -102,6 +102,14 @@ jobs:
           # XCUITest taps Record.
           sleep 2
 
+      - name: Mark log capture start
+        # Record the timestamp we want to filter `log show` from when
+        # the test finishes. macOS `log` uses RFC3339-ish "YYYY-MM-DD
+        # HH:MM:SS" strings for --start.
+        run: |
+          date -u +"%Y-%m-%d %H:%M:%S" > /tmp/mila-log-start.txt
+          cat /tmp/mila-log-start.txt
+
       - name: Run audio loopback UI test
         env:
           MILA_LOOPBACK_E2E: "1"
@@ -114,6 +122,30 @@ jobs:
             -derivedDataPath build-uitests \
             CODE_SIGNING_ALLOWED=NO \
             -resultBundlePath build-uitests/loopback.xcresult
+
+      - name: Capture VAD + LiveTranscriber os_log
+        if: always()
+        # Pulls the entire run's structured logs for VAD and
+        # LiveTranscriber. With ~60s of fixture and 30ms VAD frames
+        # this is ~2000 ticks worth of state transitions + every
+        # emit + every transcribe completion — enough to diagnose
+        # "barely picks up" reports offline.
+        run: |
+          mkdir -p build-uitests/logs
+          START="$(cat /tmp/mila-log-start.txt)"
+          /usr/bin/log show \
+            --start "$START" \
+            --style compact \
+            --predicate 'subsystem == "io.island.whisper.IslandWhisper" AND (category == "VAD" OR category == "LiveTranscriber" OR category == "RecordingSession")' \
+            > build-uitests/logs/vad-transcriber.log 2>&1 || true
+          # Summary stats so the GH summary tab shows them inline.
+          echo "## VAD emits" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -E "VAD emit utterance|LiveTranscriber utterance:" \
+            build-uitests/logs/vad-transcriber.log \
+            | head -50 \
+            >> "$GITHUB_STEP_SUMMARY" || echo "(none captured)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Stop audio playback
         if: always()
@@ -128,5 +160,8 @@ jobs:
         if: always()
         with:
           name: loopback-xcresult
-          path: build-uitests/loopback.xcresult
+          path: |
+            build-uitests/loopback.xcresult
+            build-uitests/logs
+            /tmp/mila-loopback-fixture.wav
           if-no-files-found: warn

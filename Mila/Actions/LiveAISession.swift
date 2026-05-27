@@ -57,17 +57,19 @@ final class LiveAISession: ObservableObject {
 
     /// Per-call timeout for `--resume` ticks. The default `LLMRunner`
     /// foreground timeout (300 s) is too generous for the live loop — a
-    /// stuck call would pile up coalesced ticks. 45 s is enough headroom
-    /// for a typical Haiku response once the session is warm.
-    var timeoutSeconds: TimeInterval = 45
+    /// stuck call would pile up coalesced ticks. Sonnet 4.6 (current
+    /// default) is meaningfully slower than Haiku; 90 s gives it room
+    /// without piling.
+    var timeoutSeconds: TimeInterval = 90
 
     /// First-call timeout (`.new` session). Establishing a fresh Claude
     /// session is materially slower than `--resume` (cold prompt cache,
     /// tool discovery, sandbox bring-up), so we don't apply the tight
     /// `timeoutSeconds` cap to the very first tick — it was producing a
     /// confusing "LLM CLI did not respond within the timeout" banner on
-    /// recordings that otherwise worked fine from tick 2 onward.
-    var firstCallTimeoutSeconds: TimeInterval = 90
+    /// recordings that otherwise worked fine from tick 2 onward. Bumped
+    /// to 180s after Sonnet 4.6 cold-starts were timing out at 90s.
+    var firstCallTimeoutSeconds: TimeInterval = 180
 
     init(llmSettings: LLMSettings, liveAISettings: LiveAISettings) {
         self.llmSettings = llmSettings
@@ -286,6 +288,17 @@ TRANSCRIPT SO FAR:
                     return
                 }
                 self.lastError = "Live AI: \(error.localizedDescription)"
+                // First-call failures: regenerate the session UUID so
+                // the next attempt doesn't keep colliding with a
+                // potentially wedged `claude --session-id <uuid>` state
+                // (Claude refuses to reopen a session-id that's mid-
+                // write or held). Once a session has been established
+                // (one success), we trust the UUID and just retry on
+                // the same session.
+                if !self.sessionEstablished {
+                    self.sessionID = UUID()
+                    self.lastTranscriptSent = ""
+                }
             }
             self?.isThinking = false
             self?.inFlight = nil

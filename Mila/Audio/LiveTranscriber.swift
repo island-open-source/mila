@@ -194,17 +194,36 @@ final class LiveTranscriber: ObservableObject {
     private func transcribeUtterance(samples: [Float], startSec: Double) async {
         isTranscribing = true
         defer { isTranscribing = false }
+        // Pad short utterances to a minimum length with trailing silence.
+        // Whisper.cpp's beam-search decoding (with our suppress_blank +
+        // patience=-1 params) goes into an infinite loop on inputs much
+        // shorter than the model's 30s receptive field — the model wants
+        // to emit blank tokens but can't, with no patience cap. Padding
+        // to 5s gives the decoder enough room to converge.
+        let minSamples = Int(sampleRate * 5)
+        let padded: [Float]
+        if samples.count < minSamples {
+            var p = samples
+            p.append(contentsOf: Array(repeating: 0, count: minSamples - samples.count))
+            padded = p
+        } else {
+            padded = samples
+        }
         let startedAt = Date()
-        let whisperSegs = await transcription.transcribeOnceSegments(samples: samples, language: language)
+        let whisperSegs = await transcription.transcribeOnceSegments(samples: padded, language: language)
         let elapsed = Date().timeIntervalSince(startedAt)
-        liveLog.log("LiveTranscriber utterance: samples=\(samples.count) elapsed=\(elapsed, privacy: .public)s segments=\(whisperSegs.count) startSec=\(startSec, privacy: .public)")
+        liveLog.log("LiveTranscriber utterance: samples=\(samples.count) padded=\(padded.count) elapsed=\(elapsed, privacy: .public)s segments=\(whisperSegs.count) startSec=\(startSec, privacy: .public)")
         guard !whisperSegs.isEmpty else { return }
 
         // VAD utterances are non-overlapping by construction, so we
-        // just append — no merge dedup needed.
+        // just append — no merge dedup needed. Drop segments that
+        // whisper hallucinated inside the padded silence tail (their
+        // start time falls past the original audio duration).
+        let originalDuration = Double(samples.count) / sampleRate
         for s in whisperSegs {
             let text = s.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { continue }
+            guard s.start < originalDuration else { continue }
             segments.append(LiveSegment(
                 id: UUID(),
                 startSeconds: startSec + s.start,

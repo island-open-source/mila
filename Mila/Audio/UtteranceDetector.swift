@@ -44,6 +44,10 @@ final class UtteranceDetector {
     private let noiseFloorAlpha: Float
     private let noiseFloorMultiplier: Float
     private let speechOnsetFrames: Int
+    /// Hysteresis: once in .speech, the cutoff is multiplied by this
+    /// ratio (< 1) so a brief mid-word energy dip doesn't flip us back
+    /// to silence. Standard VAD design.
+    private let stayCutoffRatio: Float
 
     private var state: State = .silence
     private var preRoll: [[Float]] = []
@@ -72,13 +76,14 @@ final class UtteranceDetector {
         sampleRate: Double = 16_000,
         frameMs: Double = 30,
         rmsThreshold: Float = 0.008,
-        silenceMs: Double = 500,
-        minUtteranceMs: Double = 400,
+        silenceMs: Double = 700,
+        minUtteranceMs: Double = 200,
         maxUtteranceMs: Double = 20_000,
         preRollMs: Double = 200,
         noiseFloorAlpha: Float = 0.02,
         noiseFloorMultiplier: Float = 3.0,
-        speechOnsetMs: Double = 90
+        speechOnsetMs: Double = 90,
+        stayCutoffRatio: Float = 0.5
     ) {
         self.sampleRate = sampleRate
         self.frameSize = max(1, Int((sampleRate * frameMs / 1000).rounded()))
@@ -90,6 +95,7 @@ final class UtteranceDetector {
         self.noiseFloorAlpha = noiseFloorAlpha
         self.noiseFloorMultiplier = noiseFloorMultiplier
         self.speechOnsetFrames = max(1, Int((speechOnsetMs / frameMs).rounded()))
+        self.stayCutoffRatio = max(0.0, min(1.0, stayCutoffRatio))
         self.preRoll = Array(repeating: [Float](), count: preRollFrames)
     }
 
@@ -141,9 +147,12 @@ final class UtteranceDetector {
 
     private func handle(frame: [Float]) {
         let energy = rms(frame)
-        // Cap the dynamic bump so a noisy room can't push the cutoff
-        // arbitrarily high — keeps quiet speakers detectable.
-        let cutoff = max(rmsThreshold, min(rmsThreshold * 2.5, noiseFloor * noiseFloorMultiplier))
+        // Enter-speech cutoff: capped dynamic threshold (room noise can
+        // raise it, but only up to 2.5× the static floor).
+        let enterCutoff = max(rmsThreshold, min(rmsThreshold * 2.5, noiseFloor * noiseFloorMultiplier))
+        // Hysteresis: once in speech, a lower cutoff keeps us in speech
+        // through brief mid-word energy dips (consonants, vowel decay).
+        let cutoff = (state == .silence) ? enterCutoff : enterCutoff * stayCutoffRatio
         let isSpeech = energy >= cutoff
 
         switch state {
