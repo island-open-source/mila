@@ -17,15 +17,15 @@ settings:
     SWIFT_STRICT_CONCURRENCY: minimal
     GENERATE_INFOPLIST_FILE: NO
     PRODUCT_BUNDLE_IDENTIFIER: io.island.whisper.IslandWhisper
-    MARKETING_VERSION: "1.6.0"
-    # 1.6.0 adds Live AI mode (live transcript + LLM-driven summary
-    # and action items via the configured Claude/Cursor CLI), the
-    # Hebrew RTL layout fixes for both live and saved-recording
-    # views, the audio loopback E2E test scaffold, and the Zoom
-    # meeting prompt's 60-minute snooze on dismiss. Builds on top
-    # of v1.5.0's diarization-by-default + open-source attribution
-    # foundation.
-    CURRENT_PROJECT_VERSION: "30"
+    MARKETING_VERSION: "1.6.1"
+    # 1.6.1 quick remediation: Live AI transcript was cutting words
+    # mid-utterance because the 5s sliding tick re-spliced overlapping
+    # whisper outputs whose segment boundaries didn't line up. Default
+    # chunk bumped from 5s to 30s so each tick transcribes one whole
+    # non-overlapping whisper window — clean boundaries, less garbled
+    # text, and no risk of the transcribe call outpacing the tick.
+    # Persisted values below 25s are migrated up automatically.
+    CURRENT_PROJECT_VERSION: "31"
 
 packages:
   TranscriptionCore:

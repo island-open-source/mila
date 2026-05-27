@@ -993,8 +993,8 @@ private struct LiveAISettingsTab: View {
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
-                    Slider(value: $settings.chunkSeconds, in: 3...20, step: 1)
-                    Text("How often Mila re-transcribes and re-prompts. Lower = more responsive, higher CPU + LLM cost.")
+                    Slider(value: $settings.chunkSeconds, in: 15...60, step: 5)
+                    Text("How often Mila re-transcribes and re-prompts. 30s is the default — matches the whisper window so words don't get cut mid-utterance. Lower = more responsive but more garbled boundaries.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

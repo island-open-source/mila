@@ -96,8 +96,12 @@ final class LiveAISettings: ObservableObject {
         self.defaults = defaults
         self.enabled = defaults.bool(forKey: Keys.enabled)
         self.model = defaults.string(forKey: Keys.model) ?? Self.defaultModel
+        // Migrate pre-1.6.1 persisted values (default was 5s, range 3-20s).
+        // 5s windows cut words mid-utterance and made the trailing-window
+        // merge stitch together inconsistent segments. 30s = one full
+        // window per tick, non-overlapping, clean boundaries.
         let raw = defaults.double(forKey: Keys.chunkSeconds)
-        self.chunkSeconds = raw > 0 ? raw : 5.0
+        self.chunkSeconds = raw >= 25.0 ? raw : 30.0
         let sim = defaults.double(forKey: Keys.simThreshold)
         self.speakerSimilarityThreshold = sim > 0 ? sim : 0.75
         self.prompt = defaults.string(forKey: Keys.prompt) ?? Self.defaultPrompt

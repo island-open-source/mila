@@ -51,7 +51,7 @@ final class LiveTranscriber: ObservableObject {
     /// flat string (e.g. the LLM feed via `formattedTranscript`).
     @Published private(set) var segments: [LiveSegment] = []
 
-    var chunkSeconds: Double = 5.0
+    var chunkSeconds: Double = 30.0
     var windowSeconds: Double = 30.0
     private let sampleRate: Double = 16_000
 
