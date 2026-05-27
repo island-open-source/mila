@@ -35,6 +35,28 @@ jobs:
           # BlackHole is a virtual audio loopback device. switchaudio-osx
           # lets us flip the system's default input from the CLI.
           brew install blackhole-2ch switchaudio-osx
+          # The brew formula drops the BlackHole driver in
+          # /Library/Audio/Plug-Ins/HAL/ but `coreaudiod` only
+          # rescans plug-ins at daemon start. Without a kick it
+          # never sees the new device and `SwitchAudioSource -s
+          # "BlackHole 2ch"` errors with "Could not find an audio
+          # device named …". Forcibly restart the daemon (launchd
+          # respawns it), then poll until it's listed.
+          sudo killall coreaudiod || true
+          for i in $(seq 1 30); do
+            if SwitchAudioSource -a -t input | grep -q "BlackHole 2ch"; then
+              echo "BlackHole visible after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          echo "--- available input devices ---"
+          SwitchAudioSource -a -t input
+          echo "--- available output devices ---"
+          SwitchAudioSource -a -t output
+          # Final sanity check — fail the step now (not later) if
+          # the daemon still doesn't see BlackHole.
+          SwitchAudioSource -a -t input | grep -q "BlackHole 2ch"
 
       - name: Grant microphone TCC to host app AND test runner
         # macOS gates microphone access via TCC. On a fresh runner the
@@ -105,7 +127,9 @@ jobs:
       - name: Mark log capture start
         # Record the timestamp we want to filter `log show` from when
         # the test finishes. macOS `log` uses RFC3339-ish "YYYY-MM-DD
-        # HH:MM:SS" strings for --start.
+        # HH:MM:SS" strings for --start. Runs after audio setup so a
+        # short window of unrelated daemon noise doesn't bloat the
+        # uploaded log.
         run: |
           date -u +"%Y-%m-%d %H:%M:%S" > /tmp/mila-log-start.txt
           cat /tmp/mila-log-start.txt
@@ -129,23 +153,32 @@ jobs:
         # LiveTranscriber. With ~60s of fixture and 30ms VAD frames
         # this is ~2000 ticks worth of state transitions + every
         # emit + every transcribe completion — enough to diagnose
-        # "barely picks up" reports offline.
+        # "barely picks up" reports offline. Tolerant of earlier
+        # steps having failed (e.g. audio setup) so the run still
+        # surfaces whatever logs DID land.
         run: |
+          set +e
           mkdir -p build-uitests/logs
-          START="$(cat /tmp/mila-log-start.txt)"
-          /usr/bin/log show \
-            --start "$START" \
-            --style compact \
-            --predicate 'subsystem == "io.island.whisper.IslandWhisper" AND (category == "VAD" OR category == "LiveTranscriber" OR category == "RecordingSession")' \
-            > build-uitests/logs/vad-transcriber.log 2>&1 || true
-          # Summary stats so the GH summary tab shows them inline.
+          if [ -f /tmp/mila-log-start.txt ]; then
+            START="$(cat /tmp/mila-log-start.txt)"
+            /usr/bin/log show \
+              --start "$START" \
+              --style compact \
+              --predicate 'subsystem == "io.island.whisper.IslandWhisper" AND (category == "VAD" OR category == "LiveTranscriber" OR category == "RecordingSession")' \
+              > build-uitests/logs/vad-transcriber.log 2>&1
+          else
+            echo "no log-start marker — earlier step likely failed before audio setup completed" \
+              > build-uitests/logs/vad-transcriber.log
+          fi
           echo "## VAD emits" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           grep -E "VAD emit utterance|LiveTranscriber utterance:" \
             build-uitests/logs/vad-transcriber.log \
             | head -50 \
-            >> "$GITHUB_STEP_SUMMARY" || echo "(none captured)" >> "$GITHUB_STEP_SUMMARY"
+            >> "$GITHUB_STEP_SUMMARY" 2>/dev/null \
+            || echo "(no emits captured)" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit 0
 
       - name: Stop audio playback
         if: always()
