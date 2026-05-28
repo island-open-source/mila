@@ -1,0 +1,108 @@
+name: Debug Mac Runner (manual SSH)
+
+# Spins up a macos-26 runner, installs everything needed for the
+# audio-loopback + LLM E2E test path, then opens a tmate SSH session
+# so we can iterate on the runner directly instead of round-tripping
+# every change through a 10-min CI run.
+#
+# Usage:
+#   gh workflow run "Debug Mac Runner (manual SSH)" \
+#     -f timeout_minutes=180
+# Then `gh run view <run-id> --log` to find the SSH URL printed by
+# action-tmate. SSH in, cd into the checkout, build/test as usual.
+#
+# The session ends when the timeout elapses OR you `touch /tmp/keepalive`
+# is *removed* (action-tmate's standard exit hook is `touch
+# /tmp/keepalive` to extend, `rm /tmp/keepalive` to end).
+
+on:
+  workflow_dispatch:
+    inputs:
+      timeout_minutes:
+        description: "How long to keep the runner alive (minutes)"
+        default: "180"
+        required: false
+
+jobs:
+  debug:
+    runs-on: macos-26
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Show toolchain + runner info
+        run: |
+          xcodebuild -version
+          sw_vers
+          hostname
+          whoami
+          echo "---"
+          df -h
+          echo "---"
+          ls -la /Applications | head -20
+
+      # Install everything we'd need for the audio-loopback path,
+      # the LLM CLI path, and a real whisper transcription run.
+      - name: Install xcodegen + BlackHole + switchaudio-osx
+        run: |
+          brew install xcodegen blackhole-2ch switchaudio-osx
+
+      - name: Restart coreaudiod (BlackHole driver pickup)
+        run: |
+          sudo killall coreaudiod || true
+          sleep 5
+          SwitchAudioSource -a -t input | head -20
+          SwitchAudioSource -a -t output | head -20
+
+      - name: Cache diarization bundle
+        id: diar-bundle-cache
+        uses: actions/cache@v4
+        with:
+          path: Mila/Resources/PythonRuntime
+          key: diar-bundle-${{ runner.os }}-${{ hashFiles('scripts/build-diarization-bundle.sh') }}
+
+      - name: Build diarization bundle (cold path only)
+        if: steps.diar-bundle-cache.outputs.cache-hit != 'true'
+        run: make bundle-diarization
+
+      - name: Cache whisper models
+        id: whisper-models-cache
+        uses: actions/cache@v4
+        with:
+          # Mila's default ModelManager location. `make models`
+          # populates this directory.
+          path: ~/Library/Application Support/Mila/Models
+          key: whisper-models-v1-${{ runner.os }}
+
+      - name: Download whisper models (cold path only)
+        if: steps.whisper-models-cache.outputs.cache-hit != 'true'
+        run: make models
+
+      - name: Install Claude CLI
+        run: |
+          # Claude Code CLI — supports `--session-id` + ANTHROPIC_API_KEY
+          # for non-interactive auth, which is what LiveAISession needs.
+          curl -fsSL https://claude.ai/install.sh | bash || true
+          # Some install methods drop into ~/.local/bin or /opt/homebrew/bin.
+          which claude || echo "claude not on PATH yet"
+          ls -la ~/.local/bin/claude 2>/dev/null || true
+          ls -la /opt/homebrew/bin/claude 2>/dev/null || true
+
+      - name: Generate Xcode project
+        run: make project
+
+      - name: Open SSH session via tmate
+        # mxschmitt/action-tmate prints an `ssh xxx@nycN.tmate.io`
+        # URL to the workflow log. Read it with `gh run view <id> --log`.
+        # limit-access-to-actor=false because we connect from a shell
+        # that doesn't necessarily have a GH OAuth token; the random
+        # URL is the access control.
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: false
+          detached: false
+          timeout-minutes: ${{ github.event.inputs.timeout_minutes }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
