@@ -35,27 +35,136 @@ final class AudioLoopbackUITests: XCTestCase {
         try runFixtureRecording(
             language: "en",
             langFlag: "--ui-test-recording-lang-en",
+            wavPathEnvVar: "MILA_FIXTURE_WAV_PATH",
             // ggml-tiny on English: catches "auth/billing/thursday"
             // unreliably; settle for one common-vocab anchor.
             longTokens: ["roadmap", "search", "auth", "billing", "thursday", "march"],
-            shortTokens: ["hi", "yes", "ok", "done", "great"]
+            shortTokens: ["hi", "yes", "ok", "done", "great"],
+            minFinalSegments: 8
+        )
+    }
+
+    /// AGC E2E. Same harness as the loud English test, but pumps a
+    /// fixture attenuated to ~-26 dBFS peak — the same signal level the
+    /// real-world bug captured from a user's MacBook Pro mic with the
+    /// system input volume turned down. The raw quiet signal sits below
+    /// the live VAD's RMS cutoff (0.012), so without AGC the live
+    /// transcript would stay empty. AGC default is ON, so this test
+    /// proves the gain stage actually closes the gap end-to-end —
+    /// fixture pump → AdaptiveGainController → onLiveSamples → VAD →
+    /// whisper → live segments.
+    ///
+    /// Strictness is loosened vs the loud test: we want to know AGC
+    /// recovered *enough* signal to clear the VAD cutoff, not that
+    /// throughput matches the loud case exactly. AGC's soft-clip and
+    /// the attack/release smoothing leave the boosted signal slightly
+    /// noisier than the original, which can cost a few segments worth
+    /// of whisper accuracy at the ggml-tiny budget.
+    func test_english_low_volume_recovered_by_agc() throws {
+        try runFixtureRecording(
+            language: "en-quiet",
+            langFlag: "--ui-test-recording-lang-en",
+            wavPathEnvVar: "MILA_FIXTURE_WAV_QUIET_PATH",
+            // Same conversation; same tokens. Don't require BOTH long
+            // and short token hits — boosted-quiet signal may hit one
+            // category cleanly while the other gets lost in the noise
+            // floor that the soft-clip amplified along with the speech.
+            longTokens: ["roadmap", "search", "auth", "billing", "thursday", "march"],
+            shortTokens: ["hi", "yes", "ok", "done", "great"],
+            minFinalSegments: 5,
+            tokenStrictness: .anyCategory
+        )
+    }
+
+    /// Negative AGC E2E. Same quiet fixture as the recovery test, but
+    /// launches with `--ui-test-disable-agc` so the injection seam
+    /// bypasses the gain stage. The raw signal sits below the VAD's RMS
+    /// cutoff (~0.012), so the live transcript must stay empty — proves
+    /// that if AGC silently stops working in a future change, the
+    /// positive `test_english_low_volume_recovered_by_agc` would
+    /// actually start failing rather than passing for some other reason
+    /// (e.g. VAD threshold drift). Opt-in via
+    /// `MILA_RUN_AGC_NEGATIVE=1` so the default UI E2E budget isn't
+    /// extended by another 2-min run on every workflow.
+    func test_english_low_volume_fails_without_agc() throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["MILA_RUN_AGC_NEGATIVE"] == "1",
+            "Set MILA_RUN_AGC_NEGATIVE=1 to run the negative AGC E2E (default off — adds ~2 min)."
+        )
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["MILA_FIXTURE_E2E"] == "1",
+            "Set MILA_FIXTURE_E2E=1 (via TEST_RUNNER_MILA_FIXTURE_E2E) to run."
+        )
+        guard let wavPath = ProcessInfo.processInfo.environment["MILA_FIXTURE_WAV_QUIET_PATH"] else {
+            XCTFail("MILA_FIXTURE_WAV_QUIET_PATH not set for negative test")
+            return
+        }
+        let app = XCUIApplication()
+        var args = [
+            "--uitests",
+            "--ui-test-recording-lang-en",
+            "--ui-test-disable-agc",
+            "--ui-test-inject-fixture-wav=\(wavPath)",
+        ]
+        if let tinyPath = ProcessInfo.processInfo.environment["MILA_TINY_MODEL_PATH"],
+           !tinyPath.isEmpty {
+            args.append("--ui-test-tiny-model-path=\(tinyPath)")
+        }
+        app.launchArguments = args
+        app.launch()
+
+        // 90s budget — short on purpose. We're asserting *absence* of
+        // segments, so the longer we wait the more likely a stray
+        // whisper hallucination shows up. 90s is well past the loud
+        // test's first-segment timing (~30-60s), so the quiet-no-AGC
+        // case has had a fair shot.
+        Thread.sleep(forTimeInterval: 90.0)
+        let segments = app.descendants(matching: .any)
+            .matching(identifier: "liveTranscript.segment")
+            .allElementsBoundByIndex
+        let segmentCount = segments.count
+        snap(app: app, name: "[en-quiet-noagc] t=90s segs=\(segmentCount)")
+        print("FixtureE2E[en-quiet-noagc]: segments=\(segmentCount) (expect ~0)")
+        // Allow a small slack — ggml-tiny occasionally emits a single
+        // hallucinated segment on near-silent input. We're proving the
+        // pipeline DOESN'T meaningfully transcribe without AGC, not
+        // that it produces literally zero output.
+        XCTAssertLessThan(
+            segmentCount, 3,
+            "Quiet fixture without AGC produced \(segmentCount) segments — " +
+            "either AGC is no longer required by the live pipeline, " +
+            "or the VAD threshold was lowered. Either way, the AGC E2E " +
+            "no longer proves what it claims."
         )
     }
 
     // MARK: - Driver
 
+    private enum TokenStrictness {
+        /// Both `longTokens` and `shortTokens` must each surface ≥ 2 hits
+        /// in the live transcript (the loud-fixture default).
+        case bothCategories
+        /// Across the union of all tokens, ≥ 2 must surface. Loosened
+        /// for the quiet/AGC case where boosted-noise eats some
+        /// short-utterance accuracy.
+        case anyCategory
+    }
+
     private func runFixtureRecording(
         language: String,
         langFlag: String,
+        wavPathEnvVar: String,
         longTokens: [String],
-        shortTokens: [String]
+        shortTokens: [String],
+        minFinalSegments: Int,
+        tokenStrictness: TokenStrictness = .bothCategories
     ) throws {
         try XCTSkipUnless(
             ProcessInfo.processInfo.environment["MILA_FIXTURE_E2E"] == "1",
             "Set MILA_FIXTURE_E2E=1 (via TEST_RUNNER_MILA_FIXTURE_E2E in xcodebuild env) to run."
         )
-        guard let wavPath = ProcessInfo.processInfo.environment["MILA_FIXTURE_WAV_PATH"] else {
-            XCTFail("MILA_FIXTURE_WAV_PATH not set — workflow must point to the generated fixture WAV")
+        guard let wavPath = ProcessInfo.processInfo.environment[wavPathEnvVar] else {
+            XCTFail("\(wavPathEnvVar) not set — workflow must point to the generated fixture WAV")
             return
         }
 
@@ -148,8 +257,8 @@ final class AudioLoopbackUITests: XCTestCase {
 
         let finalCount = counts.last?.count ?? 0
         XCTAssertGreaterThanOrEqual(
-            finalCount, 8,
-            "[\(language)] Final segment count \(finalCount) too low across 120s of fixture"
+            finalCount, minFinalSegments,
+            "[\(language)] Final segment count \(finalCount) below minimum \(minFinalSegments) across 120s of fixture"
         )
 
         // Content check: language-specific tokens must appear.
@@ -162,15 +271,25 @@ final class AudioLoopbackUITests: XCTestCase {
             .lowercased()
         print("FixtureE2E[\(language)]: ===TRANSCRIPT===\n\(transcript)\n===END===")
         let foundLong = longTokens.filter { transcript.contains($0.lowercased()) }
-        XCTAssertGreaterThanOrEqual(
-            foundLong.count, 2,
-            "[\(language)] long-utterance tokens missing (\(foundLong) of \(longTokens))"
-        )
         let foundShort = shortTokens.filter { transcript.contains($0.lowercased()) }
-        XCTAssertGreaterThanOrEqual(
-            foundShort.count, 2,
-            "[\(language)] short-utterance tokens missing (\(foundShort) of \(shortTokens))"
-        )
+        switch tokenStrictness {
+        case .bothCategories:
+            XCTAssertGreaterThanOrEqual(
+                foundLong.count, 2,
+                "[\(language)] long-utterance tokens missing (\(foundLong) of \(longTokens))"
+            )
+            XCTAssertGreaterThanOrEqual(
+                foundShort.count, 2,
+                "[\(language)] short-utterance tokens missing (\(foundShort) of \(shortTokens))"
+            )
+        case .anyCategory:
+            let total = foundLong.count + foundShort.count
+            XCTAssertGreaterThanOrEqual(
+                total, 2,
+                "[\(language)] fewer than 2 fixture tokens surfaced across either category " +
+                "(long=\(foundLong) short=\(foundShort)). AGC didn't recover enough signal."
+            )
+        }
 
         // Speaker labels: the live diarizer should have produced
         // intervals matched onto segments by now. Informational by

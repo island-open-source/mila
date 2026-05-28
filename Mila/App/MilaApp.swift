@@ -425,6 +425,14 @@ struct MilaApp: App {
     ///
     /// Avoids depending on a real microphone or BlackHole (which
     /// doesn't reliably route audio on macos-26 CI runners).
+    ///
+    /// The injected samples are run through `AdaptiveGainController`
+    /// before being handed to `onLiveSamples` so the E2E exercises the
+    /// same gain stage that `MicrophoneRecorder` applies on a real
+    /// mic. Without this the AGC e2e would be meaningless (the WAV
+    /// would reach the live VAD un-boosted regardless of the toggle).
+    /// `--ui-test-disable-agc` lets the test inject the raw, un-boosted
+    /// signal to verify AGC is what's bridging the gap.
     @MainActor
     private func injectFixtureWavIfRequested() async {
         guard let arg = CommandLine.arguments.first(where: {
@@ -436,6 +444,7 @@ struct MilaApp: App {
                 .log("inject-fixture: WAV missing at \(wavPath, privacy: .public)")
             return
         }
+        let agcEnabled = !CommandLine.arguments.contains("--ui-test-disable-agc")
         // Hand wireLiveAIPipeline a moment to mount its $state observer
         // BEFORE we flip session.state — otherwise we'd transition to
         // .recording before there's a listener to react.
@@ -451,8 +460,8 @@ struct MilaApp: App {
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
         os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
-            .log("inject-fixture: pumping \(wavPath, privacy: .public)")
-        await Self.pumpFixtureWAV(path: wavPath, to: sessionRef)
+            .log("inject-fixture: pumping \(wavPath, privacy: .public) agc=\(agcEnabled ? "on" : "off", privacy: .public)")
+        await Self.pumpFixtureWAV(path: wavPath, to: sessionRef, agcEnabled: agcEnabled)
     }
 
     /// UI-test seam for the silence-drop tests. When the launch arg
@@ -494,7 +503,14 @@ struct MilaApp: App {
     /// Supports the two WAV variants the fixture generator emits:
     /// 16-bit PCM (afconvert / our concat path) and 32-bit float
     /// (RecordingSession's own output format).
-    private static func pumpFixtureWAV(path: String, to session: RecordingSession) async {
+    ///
+    /// When `agcEnabled` is true, every chunk passes through a fresh
+    /// `AdaptiveGainController` first — mirrors the path a real mic
+    /// takes through `MicrophoneRecorder`, which is what makes the
+    /// AGC-recovery E2E meaningful for a deliberately quiet fixture.
+    private static func pumpFixtureWAV(path: String,
+                                       to session: RecordingSession,
+                                       agcEnabled: Bool) async {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return }
         // Locate the "data" chunk — afconvert emits a standard
         // RIFF/WAVE so the data chunk starts at byte 44 in practice,
@@ -505,6 +521,11 @@ struct MilaApp: App {
                 .log("inject-fixture: failed to decode WAV at \(path, privacy: .public)")
             return
         }
+        // Match MicrophoneRecorder: one controller for the lifetime of
+        // the (fake) recording, so attack/release smoothing accumulates
+        // across chunks. `enabled=false` makes it a bit-for-bit
+        // passthrough — exactly what the negative AGC test wants.
+        let agc = AdaptiveGainController(sampleRate: sampleRate, enabled: agcEnabled)
         let chunkSamples = Int(sampleRate * 0.02)  // 20ms
         let startedAt = Date()
         var pumped = 0
@@ -518,7 +539,12 @@ struct MilaApp: App {
             while offset < samples.count {
                 if Task.isCancelled { return }
                 let end = min(offset + chunkSamples, samples.count)
-                let chunk = samples[offset..<end]
+                // Copy out the chunk so we can mutate it in place
+                // through AGC without touching the source array.
+                var chunk = Array(samples[offset..<end])
+                if agcEnabled {
+                    chunk = agc.process(chunk)
+                }
                 session.onLiveSamples?(ArraySlice(chunk))
                 offset = end
                 pumped += chunk.count
@@ -532,7 +558,7 @@ struct MilaApp: App {
                 }
             }
             os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
-                .log("inject-fixture: looping, pumped=\(pumped, privacy: .public) samples so far")
+                .log("inject-fixture: looping, pumped=\(pumped, privacy: .public) samples so far gain=\(agc.currentGain, privacy: .public)")
         }
     }
 
