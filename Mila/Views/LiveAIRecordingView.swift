@@ -281,18 +281,9 @@ struct LiveAIRecordingView: View {
                             ForEach(transcriber.segments) { seg in
                                 TranscriptLineView(segment: seg, language: language)
                                     .frame(maxWidth: .infinity, alignment: textAlignment)
-                                    // .accessibilityElement(children: .combine)
-                                    // is what actually MATERIALIZES this row
-                                    // as a single accessibility node SwiftUI
-                                    // exposes to XCUITest. Without it the
-                                    // identifier modifier is a no-op because
-                                    // the TranscriptLineView wrapper isn't a
-                                    // leaf with its own accessibility element
-                                    // by default — only the inner Text views
-                                    // are, and they don't inherit the
-                                    // identifier.
-                                    .accessibilityElement(children: .combine)
-                                    .accessibilityIdentifier("liveTranscript.segment")
+                                // Identifier is applied to the inner Text
+                                // inside TranscriptLineView (where SwiftUI
+                                // actually creates a staticText a11y node).
                             }
                         }
                     }
@@ -431,6 +422,11 @@ private struct TranscriptLineView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .multilineTextAlignment(.leading)
+                // Put the identifier on the leaf Text so XCUITest's
+                // `.staticTexts.matching(identifier:)` finds it. The
+                // outer wrapper-level identifier was a no-op (SwiftUI
+                // didn't materialize an a11y node there).
+                .accessibilityIdentifier("liveTranscript.segment")
         }
         .environment(\.layoutDirection, lineRTL ? .rightToLeft : .leftToRight)
     }

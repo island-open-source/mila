@@ -90,7 +90,7 @@ final class AudioLoopbackUITests: XCTestCase {
         // have no fast GPU, so whisper's first call cold-loads the
         // 1.5GB model + Metal warmup + first transcribe ~60-90s.
         // Subsequent calls are 20-30s each. Generous timeout.
-        let firstSegment = app.descendants(matching: .any).matching(identifier: "liveTranscript.segment").firstMatch
+        let firstSegment = app.staticTexts.matching(identifier: "liveTranscript.segment").firstMatch
         let appeared = firstSegment.waitForExistence(timeout: 150)
         snap(app: app, name: "[\(language)] after first-segment wait (appeared=\(appeared))")
         XCTAssertTrue(appeared,
