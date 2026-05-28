@@ -281,6 +281,17 @@ struct LiveAIRecordingView: View {
                             ForEach(transcriber.segments) { seg in
                                 TranscriptLineView(segment: seg, language: language)
                                     .frame(maxWidth: .infinity, alignment: textAlignment)
+                                    // .accessibilityElement(children: .combine)
+                                    // is what actually MATERIALIZES this row
+                                    // as a single accessibility node SwiftUI
+                                    // exposes to XCUITest. Without it the
+                                    // identifier modifier is a no-op because
+                                    // the TranscriptLineView wrapper isn't a
+                                    // leaf with its own accessibility element
+                                    // by default — only the inner Text views
+                                    // are, and they don't inherit the
+                                    // identifier.
+                                    .accessibilityElement(children: .combine)
                                     .accessibilityIdentifier("liveTranscript.segment")
                             }
                         }
