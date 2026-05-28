@@ -390,26 +390,34 @@ struct MilaApp: App {
             return
         }
         let chunkSamples = Int(sampleRate * 0.02)  // 20ms
-        var offset = 0
         let startedAt = Date()
         var pumped = 0
-        while offset < samples.count {
-            let end = min(offset + chunkSamples, samples.count)
-            let chunk = samples[offset..<end]
-            session.onLiveSamples?(ArraySlice(chunk))
-            offset = end
-            pumped += chunk.count
-            // Pace ourselves: stay one chunk's worth ahead of wall
-            // clock so VAD / whisper run at real-time speed.
-            let elapsedTarget = Double(pumped) / sampleRate
-            let elapsedReal = Date().timeIntervalSince(startedAt)
-            if elapsedTarget > elapsedReal {
-                let napNs = UInt64((elapsedTarget - elapsedReal) * 1_000_000_000)
-                try? await Task.sleep(nanoseconds: napNs)
+        // Loop the fixture indefinitely — the test runs for ~2 min but
+        // our generated fixture is only ~70s. Without looping, segments
+        // plateau halfway through the test and the "no 30s stall"
+        // assertion would trip on what's actually just "audio ran out".
+        // Real conversations don't stop after 70s either.
+        while !Task.isCancelled {
+            var offset = 0
+            while offset < samples.count {
+                if Task.isCancelled { return }
+                let end = min(offset + chunkSamples, samples.count)
+                let chunk = samples[offset..<end]
+                session.onLiveSamples?(ArraySlice(chunk))
+                offset = end
+                pumped += chunk.count
+                // Pace ourselves: stay one chunk's worth ahead of wall
+                // clock so VAD / whisper run at real-time speed.
+                let elapsedTarget = Double(pumped) / sampleRate
+                let elapsedReal = Date().timeIntervalSince(startedAt)
+                if elapsedTarget > elapsedReal {
+                    let napNs = UInt64((elapsedTarget - elapsedReal) * 1_000_000_000)
+                    try? await Task.sleep(nanoseconds: napNs)
+                }
             }
+            os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+                .log("inject-fixture: looping, pumped=\(pumped, privacy: .public) samples so far")
         }
-        os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
-            .log("inject-fixture: pump done, \(samples.count, privacy: .public) samples at \(sampleRate, privacy: .public)Hz")
     }
 
     /// Minimal RIFF/WAVE decoder. Returns mono Float32 samples in
