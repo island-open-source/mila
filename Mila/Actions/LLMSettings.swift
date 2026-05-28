@@ -162,7 +162,7 @@ final class LLMSettings: ObservableObject {
     static let defaultNamePrompt =
         "Read the transcript below and reply with a 3–6 word title for it. Respond with just the title — no quotes, no punctuation, no preamble."
     static let defaultActionPrompt =
-        "Summarize the transcript below as bullet points and email the summary to me at uri@island.io."
+        "Summarize the transcript below as bullet points."
 
     /// Example pairs surfaced in the Settings UI as a "you could try…" hint.
     static let nameExamples: [String] = [
