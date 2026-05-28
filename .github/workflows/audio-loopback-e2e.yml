@@ -93,6 +93,13 @@ jobs:
       - name: Generate Xcode project
         run: make project
 
+      - name: Verify whisper models on disk
+        run: |
+          DIR="$HOME/Library/Application Support/Mila/Models"
+          echo "Models dir: $DIR"
+          ls -la "$DIR" || true
+          du -sh "$DIR"/* 2>/dev/null || true
+
       - name: Generate audio fixture (${{ matrix.language }})
         run: ./scripts/generate-audio-fixture.sh /tmp/mila-fixture-${{ matrix.language }}.wav ${{ matrix.language }}
 
@@ -136,7 +143,7 @@ jobs:
             /usr/bin/log show \
               --start "$START" \
               --style compact \
-              --predicate 'subsystem == "io.island.whisper.IslandWhisper" AND (category == "VAD" OR category == "LiveTranscriber" OR category == "LiveSpeakerDiarizer" OR category == "RecordingSession" OR category == "MilaApp")' \
+              --predicate '(subsystem == "io.island.whisper.IslandWhisper" AND (category == "VAD" OR category == "LiveTranscriber" OR category == "LiveSpeakerDiarizer" OR category == "RecordingSession" OR category == "MilaApp" OR category == "TranscriptionService")) OR (subsystem == "io.island.mila.Mila")' \
               > build-uitests/logs/vad-transcriber.log 2>&1
           fi
           echo "## VAD emits + diarizer intervals (${{ matrix.language }})" >> "$GITHUB_STEP_SUMMARY"

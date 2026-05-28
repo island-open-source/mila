@@ -1,6 +1,9 @@
 import Foundation
 import Combine
+import OSLog
 import TranscriptionCore
+
+private let serviceLog = Logger(subsystem: "io.island.whisper.IslandWhisper", category: "TranscriptionService")
 
 /// Coordinates batch transcription of recordings + one-shot transcription
 /// for dictation.
@@ -97,19 +100,26 @@ final class TranscriptionService: ObservableObject {
     /// rendering one line per utterance and for matching speakers to
     /// segments by time).
     func transcribeOnceSegments(samples: [Float], language: String) async -> [TranscriptSegment] {
-        guard let model = modelManager.model(for: language),
+        let candidate = modelManager.model(for: language)
+        guard let model = candidate,
               modelManager.isInstalled(model) else {
+            serviceLog.log("transcribeOnceSegments: SKIP — model not installed for lang=\(language, privacy: .public) candidate=\(candidate?.name ?? "nil", privacy: .public) installed=\(self.modelManager.installed, privacy: .public)")
             return []
         }
+        let modelURL = modelManager.url(for: model)
+        let startedAt = Date()
+        serviceLog.log("transcribeOnceSegments: loading model=\(model.name, privacy: .public) at \(modelURL.path, privacy: .public)")
         do {
-            try await engine.loadIfNeeded(modelURL: modelManager.url(for: model),
+            try await engine.loadIfNeeded(modelURL: modelURL,
                                           displayName: model.displayName)
-            return try await engine.transcribe(samples: samples,
-                                               language: language,
-                                               progress: nil,
-                                               isCancelled: nil)
+            let segs = try await engine.transcribe(samples: samples,
+                                                   language: language,
+                                                   progress: nil,
+                                                   isCancelled: nil)
+            serviceLog.log("transcribeOnceSegments: model=\(model.name, privacy: .public) lang=\(language, privacy: .public) samples=\(samples.count, privacy: .public) elapsed=\(Date().timeIntervalSince(startedAt), privacy: .public)s segs=\(segs.count, privacy: .public)")
+            return segs
         } catch {
-            print("Dictation transcription error: \(error)")
+            serviceLog.log("transcribeOnceSegments: FAILED model=\(model.name, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
             return []
         }
     }

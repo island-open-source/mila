@@ -120,6 +120,7 @@ final class ModelManager: NSObject, ObservableObject {
             found.insert(model.name)
         }
         installed = found
+        modelLogger.log("refreshInstalled: dir=\(self.modelsDirectory.path, privacy: .public) found=\(found, privacy: .public)")
     }
 
     func delete(_ model: WhisperModel) throws {
