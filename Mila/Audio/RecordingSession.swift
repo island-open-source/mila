@@ -107,6 +107,34 @@ final class RecordingSession: ObservableObject {
         }
     }
 
+    /// UI-test seam: flip state to .recording without spinning up
+    /// AVAudioEngine. The caller (a launch-arg-driven injection task
+    /// in `MilaApp.init`) is responsible for pushing samples into
+    /// `onLiveSamples` to drive the rest of the pipeline. Avoids
+    /// depending on a real microphone (or a CI-flaky virtual loopback
+    /// like BlackHole) for the audio-capture E2E.
+    ///
+    /// Stop is the same as the real flow: caller invokes `stop()` and
+    /// gets back the (possibly nil) outputURL.
+    func startFakeForTesting(outputURL: URL) async {
+        guard state == .idle else { return }
+        self.source = .microphone
+        self.fileURL = outputURL
+        self.writesSinceStart = 0
+        // Skip AVAudioFile setup — the test injects samples directly
+        // into onLiveSamples; nothing should be writing to disk.
+        startTime = Date()
+        state = .recording
+        timerTask = Task { @MainActor [weak self] in
+            while let self, self.state == .recording {
+                if let start = self.startTime {
+                    self.elapsed = Date().timeIntervalSince(start)
+                }
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+        }
+    }
+
     func stop() async -> URL? {
         guard state == .recording else { return fileURL }
         state = .stopping

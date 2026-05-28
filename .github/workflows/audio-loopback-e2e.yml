@@ -1,78 +1,46 @@
 name: Audio Loopback E2E
 
-# Real-audio loopback test. Plays a synthesised WAV through BlackHole
-# (a virtual audio device set as the macOS default input), then drives
-# Mila through Record → Stop via XCUITest, and asserts live segments
-# actually appear in the live transcript pane.
+# CI E2E that exercises the full live-recording pipeline (VAD →
+# whisper → diarizer → LiveAISession) using a fixture-injection
+# seam, NOT a virtual audio device. BlackHole was unreliable on
+# macos-26 runners — the driver fails to actually route audio after
+# install. The injection seam (`MilaApp.injectFixtureWavIfRequested`)
+# pumps a WAV through `session.onLiveSamples` at real-time 16kHz,
+# which exercises every code path downstream of audio capture.
 #
-# Catches regressions in the audio capture wiring that mock-based unit
-# tests miss — specifically the `RecordingSession.onLiveSamples →
-# LiveTranscriber.ingest` seam where a real production bug ("nothing
-# transcribed live") slipped through the existing suite in PR #20.
-#
-# Cadence: nightly + workflow_dispatch. NOT on every push — the run is
-# ~10 min on macos-26 (BlackHole install + TCC manipulation + full app
-# build + 30s of real whisper inference).
+# Cadence: workflow_dispatch only. Whisper models (~1.5 GB) +
+# Claude CLI install take a while cold; cache makes subsequent runs
+# ~2 min to "test starts running".
 
 on:
-  schedule:
-    # 03:00 UTC daily — outside US/EU work hours, before morning standup.
-    - cron: "0 3 * * *"
   workflow_dispatch:
+    inputs:
+      include_llm_summary:
+        description: "Install Claude CLI + assert LLM summary too (needs ANTHROPIC_API_KEY secret)"
+        type: boolean
+        default: true
 
 jobs:
-  audio-loopback:
-    name: Real audio capture E2E (${{ matrix.language }})
+  e2e:
+    name: Fixture E2E (${{ matrix.language }})
     runs-on: macos-26
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        # One job per recording language. Hebrew uses `say -v Carmit`,
-        # English uses Allison/Tom. Same conversation shape so the
-        # transcript-token assertions can verify per-language coverage.
         language: [en, he]
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install BlackHole + switchaudio-osx
-        run: |
-          # BlackHole is a virtual audio loopback device. switchaudio-osx
-          # lets us flip the system's default input from the CLI.
-          brew install blackhole-2ch switchaudio-osx
-          # The brew formula drops the BlackHole driver in
-          # /Library/Audio/Plug-Ins/HAL/ but `coreaudiod` only
-          # rescans plug-ins at daemon start. Without a kick it
-          # never sees the new device and `SwitchAudioSource -s
-          # "BlackHole 2ch"` errors with "Could not find an audio
-          # device named …". Forcibly restart the daemon (launchd
-          # respawns it), then poll until it's listed.
-          sudo killall coreaudiod || true
-          for i in $(seq 1 30); do
-            if SwitchAudioSource -a -t input | grep -q "BlackHole 2ch"; then
-              echo "BlackHole visible after ${i}s"
-              break
-            fi
-            sleep 1
-          done
-          echo "--- available input devices ---"
-          SwitchAudioSource -a -t input
-          echo "--- available output devices ---"
-          SwitchAudioSource -a -t output
-          # Final sanity check — fail the step now (not later) if
-          # the daemon still doesn't see BlackHole.
-          SwitchAudioSource -a -t input | grep -q "BlackHole 2ch"
+      - name: Install xcodegen
+        run: brew install xcodegen
 
-      - name: Grant microphone TCC to host app AND test runner
-        # macOS gates microphone access via TCC. On a fresh runner the
-        # first capture fires an interactive prompt that CI can't
-        # dismiss. The mic access happens INSIDE the host app
-        # (`io.island.whisper.IslandWhisper`) — granting only the
-        # `.xctrunner` bundle isn't enough. Pre-grant both. Ignore the
-        # sqlite "unsafe to write outside transaction" warning — that's
-        # TCC.db's WAL doing its job.
+      - name: Pre-grant microphone TCC (defensive)
+        # The fixture-injection path doesn't actually call AVAudioEngine,
+        # but TCC still gates first-time launches. Pre-grant so the
+        # XCUITest launch doesn't dead-end on a prompt.
         run: |
           TCC_DB="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
           for client in \
@@ -80,25 +48,8 @@ jobs:
               "io.island.whisper.IslandWhisperUITests.xctrunner"; do
             sqlite3 "$TCC_DB" \
               "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceMicrophone', '$client', 0, 2, 4, 1, 'UNUSED', 0, strftime('%s','now'));" \
-              || echo "::warning::TCC pre-grant for $client failed — first run may need manual prompt"
+              || echo "::warning::TCC pre-grant for $client failed"
           done
-
-      - name: Route audio through BlackHole (both directions)
-        # BlackHole is a loopback device — audio rendered to its OUTPUT
-        # appears on its INPUT. Setting BlackHole as the default OUTPUT
-        # lets the fixture's afplay (which targets default output)
-        # actually feed the loopback; setting it as the default INPUT
-        # lets Mila pick it up via AVAudioEngine's default mic. Without
-        # both, the fixture renders to a real speaker that Mila can't
-        # see.
-        run: |
-          SwitchAudioSource -t input  -s "BlackHole 2ch"
-          SwitchAudioSource -t output -s "BlackHole 2ch"
-          SwitchAudioSource -c -t input
-          SwitchAudioSource -c -t output
-
-      - name: Install xcodegen
-        run: brew install xcodegen
 
       - name: Cache diarization bundle
         id: diar-bundle-cache
@@ -111,45 +62,56 @@ jobs:
         if: steps.diar-bundle-cache.outputs.cache-hit != 'true'
         run: make bundle-diarization
 
+      - name: Cache whisper models
+        id: whisper-models-cache
+        uses: actions/cache@v4
+        with:
+          # `make models` populates this directory.
+          path: ~/Library/Application Support/Mila/Models
+          key: whisper-models-v1-${{ runner.os }}
+
+      - name: Download whisper models (cold path only)
+        if: steps.whisper-models-cache.outputs.cache-hit != 'true'
+        run: make models
+
+      - name: Install Claude CLI (when LLM E2E requested)
+        id: claude-cli
+        if: ${{ github.event.inputs.include_llm_summary == 'true' || github.event.inputs.include_llm_summary == null }}
+        run: |
+          # Claude Code: supports ANTHROPIC_API_KEY for non-interactive
+          # auth, which is what LiveAISession needs in CI.
+          curl -fsSL https://claude.ai/install.sh | bash || true
+          # Try common install locations.
+          for p in "$HOME/.local/bin/claude" "/opt/homebrew/bin/claude" "/usr/local/bin/claude"; do
+            if [ -x "$p" ]; then
+              echo "claude_path=$p" >> "$GITHUB_OUTPUT"
+              "$p" --version || true
+              break
+            fi
+          done
+
       - name: Generate Xcode project
         run: make project
 
       - name: Generate audio fixture (${{ matrix.language }})
-        run: ./scripts/generate-audio-fixture.sh /tmp/mila-loopback-fixture.wav ${{ matrix.language }}
-
-      - name: Start audio playback (background)
-        # Loop the fixture so it keeps feeding BlackHole for the entire
-        # test window. With BlackHole now the default OUTPUT,
-        # plain `afplay` lands on the loopback (no `-d` flag needed —
-        # and avoids any ambiguity over device UID vs name).
-        # Background process; the test step kills it via the
-        # `kill` step below.
-        run: |
-          (while true; do afplay /tmp/mila-loopback-fixture.wav; done) &
-          echo $! > /tmp/afplay.pid
-          # Small head start so audio is already flowing when the
-          # XCUITest taps Record.
-          sleep 2
+        run: ./scripts/generate-audio-fixture.sh /tmp/mila-fixture-${{ matrix.language }}.wav ${{ matrix.language }}
 
       - name: Mark log capture start
-        # Record the timestamp we want to filter `log show` from when
-        # the test finishes. macOS `log` uses RFC3339-ish "YYYY-MM-DD
-        # HH:MM:SS" strings for --start. Runs after audio setup so a
-        # short window of unrelated daemon noise doesn't bloat the
-        # uploaded log.
         run: |
           date -u +"%Y-%m-%d %H:%M:%S" > /tmp/mila-log-start.txt
           cat /tmp/mila-log-start.txt
 
-      - name: Run audio loopback UI test (${{ matrix.language }})
+      - name: Run fixture-injection E2E (${{ matrix.language }})
         env:
-          # xcodebuild strips the `TEST_RUNNER_` prefix and exposes the
-          # remaining name as an env var inside the test process — that's
-          # how we feed MILA_LOOPBACK_E2E=1 to `ProcessInfo.processInfo
-          # .environment` inside the XCTest target. Plain shell env vars
-          # do NOT propagate through to the test runner. See:
-          # https://developer.apple.com/documentation/xcode/running-tests-and-interpreting-results
-          TEST_RUNNER_MILA_LOOPBACK_E2E: "1"
+          # TEST_RUNNER_ prefix → xcodebuild strips it and passes the
+          # rest to the XCTest process. Without this prefix the env
+          # var doesn't propagate.
+          TEST_RUNNER_MILA_FIXTURE_E2E: "1"
+          TEST_RUNNER_MILA_FIXTURE_WAV_PATH: /tmp/mila-fixture-${{ matrix.language }}.wav
+          TEST_RUNNER_MILA_CLAUDE_PATH: ${{ steps.claude-cli.outputs.claude_path }}
+          # Mila's LiveAISession reads ANTHROPIC_API_KEY indirectly
+          # through the Claude CLI it shells out to.
+          TEST_RUNNER_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           case "${{ matrix.language }}" in
             en) TEST="test_english_two_minute_recording_progresses" ;;
@@ -164,15 +126,8 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             -resultBundlePath build-uitests/loopback.xcresult
 
-      - name: Capture VAD + LiveTranscriber os_log
+      - name: Capture VAD + LiveTranscriber + LiveSpeakerDiarizer os_log
         if: always()
-        # Pulls the entire run's structured logs for VAD and
-        # LiveTranscriber. With ~60s of fixture and 30ms VAD frames
-        # this is ~2000 ticks worth of state transitions + every
-        # emit + every transcribe completion — enough to diagnose
-        # "barely picks up" reports offline. Tolerant of earlier
-        # steps having failed (e.g. audio setup) so the run still
-        # surfaces whatever logs DID land.
         run: |
           set +e
           mkdir -p build-uitests/logs
@@ -181,37 +136,24 @@ jobs:
             /usr/bin/log show \
               --start "$START" \
               --style compact \
-              --predicate 'subsystem == "io.island.whisper.IslandWhisper" AND (category == "VAD" OR category == "LiveTranscriber" OR category == "RecordingSession")' \
+              --predicate 'subsystem == "io.island.whisper.IslandWhisper" AND (category == "VAD" OR category == "LiveTranscriber" OR category == "LiveSpeakerDiarizer" OR category == "RecordingSession" OR category == "MilaApp")' \
               > build-uitests/logs/vad-transcriber.log 2>&1
-          else
-            echo "no log-start marker — earlier step likely failed before audio setup completed" \
-              > build-uitests/logs/vad-transcriber.log
           fi
-          echo "## VAD emits" >> "$GITHUB_STEP_SUMMARY"
+          echo "## VAD emits + diarizer intervals (${{ matrix.language }})" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          grep -E "VAD emit utterance|LiveTranscriber utterance:" \
-            build-uitests/logs/vad-transcriber.log \
-            | head -50 \
-            >> "$GITHUB_STEP_SUMMARY" 2>/dev/null \
-            || echo "(no emits captured)" >> "$GITHUB_STEP_SUMMARY"
+          grep -E "VAD emit utterance|LiveTranscriber utterance:|interval added|inject-fixture" \
+            build-uitests/logs/vad-transcriber.log 2>/dev/null \
+            | head -60 \
+            >> "$GITHUB_STEP_SUMMARY" || echo "(no relevant lines)" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit 0
-
-      - name: Stop audio playback
-        if: always()
-        run: |
-          if [ -f /tmp/afplay.pid ]; then
-            pkill -P "$(cat /tmp/afplay.pid)" 2>/dev/null || true
-            kill "$(cat /tmp/afplay.pid)" 2>/dev/null || true
-          fi
-          pkill -f afplay || true
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: loopback-xcresult-${{ matrix.language }}
+          name: e2e-${{ matrix.language }}
           path: |
             build-uitests/loopback.xcresult
             build-uitests/logs
-            /tmp/mila-loopback-fixture.wav
+            /tmp/mila-fixture-${{ matrix.language }}.wav
           if-no-files-found: warn

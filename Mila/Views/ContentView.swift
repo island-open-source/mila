@@ -236,7 +236,9 @@ struct ContentView: View {
     private var detailContent: some View {
         switch selection ?? .home {
         case .home:
-            if actions.isRecording || CommandLine.arguments.contains("--ui-test-rtl-live-hebrew") {
+            if actions.isRecording
+                || CommandLine.arguments.contains("--ui-test-rtl-live-hebrew")
+                || CommandLine.arguments.contains(where: { $0.hasPrefix("--ui-test-inject-fixture-wav=") }) {
                 // Live transcription is always on during a recording —
                 // the AI summarization layer (action items / final
                 // summary) only activates when Live AI is enabled +

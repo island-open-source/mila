@@ -120,6 +120,18 @@ struct MilaApp: App {
         } else if CommandLine.arguments.contains("--ui-test-recording-lang-he") {
             langSettings.current = .hebrew
         }
+        // CI E2E: point LLMSettings at a Claude CLI installed on the
+        // runner. With ANTHROPIC_API_KEY set in the env, the CLI
+        // authenticates non-interactively and Live AI's session loop
+        // runs for real instead of being silently skipped because
+        // `isConfigured == false`.
+        if let arg = CommandLine.arguments.first(where: {
+            $0.hasPrefix("--ui-test-llm-claude=")
+        }) {
+            let path = String(arg.dropFirst("--ui-test-llm-claude=".count))
+            llm.tool = .claude
+            llm.executablePath = path
+        }
         if CommandLine.arguments.contains("--ui-test-rtl-live-hebrew") {
             liveTrans.seedForTesting([
                 LiveSegment(id: UUID(), startSeconds: 0, endSeconds: 2,
@@ -207,6 +219,7 @@ struct MilaApp: App {
                 .task { enqueueRecoveredRecordings() }
                 .task { startMeetingDetectionIfNeeded() }
                 .task { await wireLiveAIPipeline() }
+                .task { await injectFixtureWavIfRequested() }
                 .environmentObject(meetingDetectionSettings)
         }
         .commands {
@@ -311,6 +324,169 @@ struct MilaApp: App {
     /// when a recording is in flight + the feature is enabled +
     /// LLM is configured.
     ///
+    /// CI E2E injection seam. If `--ui-test-inject-fixture-wav=PATH`
+    /// is present, kicks off a fake recording (no AVAudioEngine) and
+    /// pumps the WAV's samples through `session.onLiveSamples` at the
+    /// real-time 16kHz rate. The rest of the pipeline (VAD →
+    /// transcriber → diarizer → LiveAISession) runs exactly as in
+    /// production because they all observe `session.state` / get
+    /// wired by `wireLiveAIPipeline`'s `.recording` branch.
+    ///
+    /// Avoids depending on a real microphone or BlackHole (which
+    /// doesn't reliably route audio on macos-26 CI runners).
+    @MainActor
+    private func injectFixtureWavIfRequested() async {
+        guard let arg = CommandLine.arguments.first(where: {
+            $0.hasPrefix("--ui-test-inject-fixture-wav=")
+        }) else { return }
+        let wavPath = String(arg.dropFirst("--ui-test-inject-fixture-wav=".count))
+        guard FileManager.default.fileExists(atPath: wavPath) else {
+            os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+                .log("inject-fixture: WAV missing at \(wavPath, privacy: .public)")
+            return
+        }
+        // Hand wireLiveAIPipeline a moment to mount its $state observer
+        // BEFORE we flip session.state — otherwise we'd transition to
+        // .recording before there's a listener to react.
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        let sessionRef = session
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mila-fake-recording-\(UUID().uuidString).wav")
+        await sessionRef.startFakeForTesting(outputURL: outputURL)
+        // Wait for wireLiveAIPipeline to install onLiveSamples (it
+        // does so once the .recording case fires). Poll up to ~3s.
+        for _ in 0..<60 {
+            if sessionRef.onLiveSamples != nil { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+            .log("inject-fixture: pumping \(wavPath, privacy: .public)")
+        await Self.pumpFixtureWAV(path: wavPath, to: sessionRef)
+    }
+
+    /// Read a 16kHz mono WAV from disk and feed it to
+    /// `session.onLiveSamples` in 20ms chunks paced at real-time.
+    /// Supports the two WAV variants the fixture generator emits:
+    /// 16-bit PCM (afconvert / our concat path) and 32-bit float
+    /// (RecordingSession's own output format).
+    private static func pumpFixtureWAV(path: String, to session: RecordingSession) async {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return }
+        // Locate the "data" chunk — afconvert emits a standard
+        // RIFF/WAVE so the data chunk starts at byte 44 in practice,
+        // but parsing it lets us tolerate fmt chunks of different
+        // sizes (e.g. with an `fact` chunk for float WAVs).
+        guard let (samples, sampleRate) = Self.decodeWAV(data: data) else {
+            os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+                .log("inject-fixture: failed to decode WAV at \(path, privacy: .public)")
+            return
+        }
+        let chunkSamples = Int(sampleRate * 0.02)  // 20ms
+        var offset = 0
+        let startedAt = Date()
+        var pumped = 0
+        while offset < samples.count {
+            let end = min(offset + chunkSamples, samples.count)
+            let chunk = samples[offset..<end]
+            session.onLiveSamples?(ArraySlice(chunk))
+            offset = end
+            pumped += chunk.count
+            // Pace ourselves: stay one chunk's worth ahead of wall
+            // clock so VAD / whisper run at real-time speed.
+            let elapsedTarget = Double(pumped) / sampleRate
+            let elapsedReal = Date().timeIntervalSince(startedAt)
+            if elapsedTarget > elapsedReal {
+                let napNs = UInt64((elapsedTarget - elapsedReal) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: napNs)
+            }
+        }
+        os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+            .log("inject-fixture: pump done, \(samples.count, privacy: .public) samples at \(sampleRate, privacy: .public)Hz")
+    }
+
+    /// Minimal RIFF/WAVE decoder. Returns mono Float32 samples in
+    /// [-1, 1] + the sample rate, or nil on parse failure. Handles
+    /// both 16-bit PCM and 32-bit float; collapses stereo to mono.
+    private static func decodeWAV(data: Data) -> (samples: [Float], sampleRate: Double)? {
+        guard data.count > 44 else { return nil }
+        guard data.prefix(4) == Data("RIFF".utf8),
+              data[8..<12] == Data("WAVE".utf8) else { return nil }
+        var idx = 12
+        var fmtTag: UInt16 = 0
+        var channels: UInt16 = 1
+        var sampleRate: UInt32 = 16_000
+        var bitsPerSample: UInt16 = 16
+        var dataStart = -1
+        var dataLen = 0
+        while idx + 8 <= data.count {
+            let id = String(data: data[idx..<idx+4], encoding: .ascii) ?? ""
+            let size = Int(data[idx+4..<idx+8].withUnsafeBytes { $0.load(as: UInt32.self).littleEndian })
+            let payloadStart = idx + 8
+            switch id {
+            case "fmt ":
+                fmtTag = data[payloadStart..<payloadStart+2].withUnsafeBytes { $0.load(as: UInt16.self).littleEndian }
+                channels = data[payloadStart+2..<payloadStart+4].withUnsafeBytes { $0.load(as: UInt16.self).littleEndian }
+                sampleRate = data[payloadStart+4..<payloadStart+8].withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+                bitsPerSample = data[payloadStart+14..<payloadStart+16].withUnsafeBytes { $0.load(as: UInt16.self).littleEndian }
+            case "data":
+                dataStart = payloadStart
+                dataLen = size
+            default:
+                break
+            }
+            idx = payloadStart + size
+            if dataStart >= 0 { break }
+        }
+        guard dataStart >= 0, dataStart + dataLen <= data.count else { return nil }
+        let payload = data[dataStart..<dataStart+dataLen]
+        var samples: [Float] = []
+        if fmtTag == 1 && bitsPerSample == 16 {
+            // 16-bit PCM
+            let count = dataLen / 2
+            samples.reserveCapacity(count / Int(channels))
+            payload.withUnsafeBytes { raw in
+                let i16 = raw.bindMemory(to: Int16.self)
+                if channels == 1 {
+                    for i in 0..<count {
+                        samples.append(Float(i16[i]) / 32768.0)
+                    }
+                } else {
+                    let frames = count / Int(channels)
+                    for f in 0..<frames {
+                        var sum: Float = 0
+                        for c in 0..<Int(channels) {
+                            sum += Float(i16[f * Int(channels) + c]) / 32768.0
+                        }
+                        samples.append(sum / Float(channels))
+                    }
+                }
+            }
+        } else if fmtTag == 3 && bitsPerSample == 32 {
+            // 32-bit float
+            let count = dataLen / 4
+            samples.reserveCapacity(count / Int(channels))
+            payload.withUnsafeBytes { raw in
+                let f32 = raw.bindMemory(to: Float.self)
+                if channels == 1 {
+                    for i in 0..<count {
+                        samples.append(f32[i])
+                    }
+                } else {
+                    let frames = count / Int(channels)
+                    for f in 0..<frames {
+                        var sum: Float = 0
+                        for c in 0..<Int(channels) {
+                            sum += f32[f * Int(channels) + c]
+                        }
+                        samples.append(sum / Float(channels))
+                    }
+                }
+            }
+        } else {
+            return nil
+        }
+        return (samples, Double(sampleRate))
+    }
+
     /// MilaApp is a struct so we can't `[weak self]` here — but every
     /// dependency is a `@StateObject` (reference type), which is what
     /// the closures actually need. Captured directly by reference.
