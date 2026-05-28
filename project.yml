@@ -17,7 +17,31 @@ settings:
     SWIFT_STRICT_CONCURRENCY: minimal
     GENERATE_INFOPLIST_FILE: NO
     PRODUCT_BUNDLE_IDENTIFIER: io.island.whisper.IslandWhisper
-    MARKETING_VERSION: "1.6.5"
+    MARKETING_VERSION: "1.7.0"
+    # 1.7.0 ships eight features in one batch:
+    #   * Adaptive mic gain control (AGC): boosts low-volume input to
+    #     a -26 dBFS target with smooth attack/release + soft clip.
+    #     Live transcript stays useful even when system mic input is
+    #     low. Toggle in Settings → Audio Input.
+    #   * Summary backfill + regenerate: completed recordings missing
+    #     a summary get one filled on launch + when LLM CLI is
+    #     enabled. Right-click → Regenerate summary in the detail
+    #     view + rename sheet.
+    #   * Post-record popup: always appears with summary + action
+    #     items. Send-to-Claude carries transcript + summary.
+    #   * Save summary to disk: `.summary.txt` sidecar next to the
+    #     transcript. LLM summary generated for every recording when
+    #     the CLI is configured, not just Live AI mode.
+    #   * Copyable summary: right-click → Copy in the detail view +
+    #     rename sheet.
+    #   * Configurable recordings directory: Settings → Storage with
+    #     a folder picker (security-scoped bookmark) and "Reset to
+    #     default" action.
+    #   * App-record silence auto-drop: system-audio leg drops after
+    #     a silent window (5 min prod, 10s in UI tests).
+    #   * MacBook Air hardware gate: skips the live AI pipeline on
+    #     Air-class chips (whisper + pyannote together can't keep up
+    #     real-time), recording + post-record transcribe still runs.
     # 1.6.4 ships live speaker labels + instant save:
     #   * Wired the LiveSpeakerDiarizer feed — pyannote daemon was
     #     spawning but no one was calling diarizer.process; speaker
@@ -37,7 +61,7 @@ settings:
     #     labels at stop time so the final utterance gets its
     #     speaker label before saving (4 race fixes from Bugbot
     #     review). Still writes the .srt sidecar.
-    CURRENT_PROJECT_VERSION: "35"
+    CURRENT_PROJECT_VERSION: "36"
 
 packages:
   TranscriptionCore:
