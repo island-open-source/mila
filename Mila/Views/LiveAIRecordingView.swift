@@ -291,7 +291,19 @@ struct LiveAIRecordingView: View {
                     .padding(.bottom, 18)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .id("transcript-body")
-                    .accessibilityIdentifier("liveTranscript.container")
+                    // Intentionally NOT setting accessibilityIdentifier
+                    // here: when this VStack has a single child SwiftUI
+                    // collapses the wrapper into the child's a11y
+                    // element, and the parent identifier overrides any
+                    // identifier set on the child (e.g. on
+                    // `Text("Listening…")` or on each
+                    // `Text(segment.text)` inside TranscriptLineView).
+                    // The XCUITest queries for `liveTranscript.listening`
+                    // / `liveTranscript.segment` were silently failing
+                    // because both leaves ended up as
+                    // `liveTranscript.container` in the tree. The
+                    // identifier was only here for diagnostics and isn't
+                    // queried in production.
                     Color.clear.frame(height: 1).id("bottom-anchor")
                 }
                 .onChange(of: transcriber.segments.count) { _, _ in

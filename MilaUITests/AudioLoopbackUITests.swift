@@ -99,8 +99,15 @@ final class AudioLoopbackUITests: XCTestCase {
         let firstSegment = app.staticTexts.matching(identifier: "liveTranscript.segment").firstMatch
         let appeared = firstSegment.waitForExistence(timeout: 150)
         snap(app: app, name: "[\(language)] after first-segment wait (appeared=\(appeared))")
+        if !appeared {
+            // Dump the a11y tree AT FAILURE so we can see what identifiers
+            // actually exist when the test gives up.
+            print("FixtureE2E[\(language)]: ===A11Y TREE AT FAILURE===")
+            print(app.debugDescription)
+            print("FixtureE2E[\(language)]: ===A11Y TREE END===")
+        }
         XCTAssertTrue(appeared,
-                      "[\(language)] No live segment after 150s — see post-launch snapshot for whether the view rendered at all")
+                      "[\(language)] No live segment after 150s — see a11y tree dump above")
 
         // 12 snapshots × 10s = 120s of recording. Track segment counts
         // and screenshot each.
