@@ -85,6 +85,12 @@ final class AudioLoopbackUITests: XCTestCase {
         let listeningVisible = app.descendants(matching: .any)
             .matching(identifier: "liveTranscript.listening").firstMatch.exists
         print("FixtureE2E[\(language)]: post-launch container=\(containerVisible) listening=\(listeningVisible)")
+        // Dump the entire accessibility tree so we can see what XCUITest
+        // actually sees. Truncated in CI logs but still gives us the
+        // shape we need.
+        print("FixtureE2E[\(language)]: ===A11Y TREE BEGIN===")
+        print(app.debugDescription)
+        print("FixtureE2E[\(language)]: ===A11Y TREE END===")
 
         // Wait for the first VAD-emitted segment. CI macos-26 runners
         // have no fast GPU, so whisper's first call cold-loads the
