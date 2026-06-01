@@ -922,17 +922,30 @@ private struct LiveAISettingsTab: View {
     /// so taking the user's settings back to a fast Mac restores the
     /// previous state without surprises.
     private var hardwareDisabledNotice: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.circle.fill")
-                .foregroundStyle(.orange)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Disabled on this Mac")
-                    .font(.callout.weight(.semibold))
-                Text("MacBook Air — Live AI is too slow on Air-class chips. Recordings will still transcribe in the background.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Disabled on this Mac")
+                        .font(.callout.weight(.semibold))
+                    Text("MacBook Air — Live AI was too slow on Air-class chips when this gate was added. With Apple Neural Engine encoder offload it may now keep up. Recordings still transcribe in the background regardless.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
+            Toggle(isOn: $settings.forceLiveAIOnLowEndHardware) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Try Live AI anyway")
+                        .font(.callout)
+                    Text("Override the hardware gate. If transcription lags behind, disable this and use background mode instead.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
