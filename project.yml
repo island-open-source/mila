@@ -17,7 +17,7 @@ settings:
     SWIFT_STRICT_CONCURRENCY: minimal
     GENERATE_INFOPLIST_FILE: NO
     PRODUCT_BUNDLE_IDENTIFIER: io.island.whisper.IslandWhisper
-    MARKETING_VERSION: "1.7.0"
+    MARKETING_VERSION: "1.8.0"
     # 1.7.0 ships eight features in one batch:
     #   * Adaptive mic gain control (AGC): boosts low-volume input to
     #     a -26 dBFS target with smooth attack/release + soft clip.
@@ -61,7 +61,7 @@ settings:
     #     labels at stop time so the final utterance gets its
     #     speaker label before saving (4 race fixes from Bugbot
     #     review). Still writes the .srt sidecar.
-    CURRENT_PROJECT_VERSION: "36"
+    CURRENT_PROJECT_VERSION: "37"
 
 packages:
   TranscriptionCore:

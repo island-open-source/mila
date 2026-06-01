@@ -208,6 +208,39 @@ final class QuickActionsControllerTests: XCTestCase {
         func tick() -> Int { value += 1; return value }
     }
 
+    /// REGRESSION (PR #32 follow-up — Bugbot Finding #1, "inline drain
+    /// still races a new recording"):
+    ///
+    /// `stopRecording`'s inline drain holds `isFinalizingRecording = true`
+    /// across multiple `await`s. Without a re-entry guard, a Record-button
+    /// tap landing on @MainActor between those awaits would call
+    /// `startRecording` → wipe the live segments and apply an empty
+    /// snapshot to the OLD recording's id. The guard makes `toggleRecord`
+    /// a no-op while finalize is in flight; this test pins that behavior
+    /// by setting the flag manually and asserting nothing observable
+    /// happens.
+    func test_toggleRecord_no_op_while_finalizing() async {
+        XCTAssertEqual(controller.activeJob, .none)
+        controller.isFinalizingRecording = true
+        await controller.toggleRecord(withSystemAudio: false)
+        XCTAssertEqual(controller.activeJob, .none,
+                       "toggleRecord must not start a recording while finalize is in flight")
+        XCTAssertFalse(controller.isRecording)
+        controller.isFinalizingRecording = false
+    }
+
+    /// Same guard, exercised via the back-compat `toggleVoiceMemo` shim
+    /// the menu command + UI tests use. Both entry points must honor
+    /// the finalize gate.
+    func test_toggleVoiceMemo_no_op_while_finalizing() async {
+        XCTAssertEqual(controller.activeJob, .none)
+        controller.isFinalizingRecording = true
+        await controller.toggleVoiceMemo()
+        XCTAssertEqual(controller.activeJob, .none)
+        XCTAssertFalse(controller.isRecording)
+        controller.isFinalizingRecording = false
+    }
+
     func test_user_bug_repro_second_recording_after_first_started_transcribing() async throws {
         let first = tempRoot.appendingPathComponent("recording-A.wav")
         let second = tempRoot.appendingPathComponent("recording-B.wav")

@@ -40,9 +40,19 @@ final class LiveTranscriber: ObservableObject {
     /// Accumulated, growing transcript. Drives the live transcript pane.
     @Published private(set) var fullText: String = ""
     /// Set true while a whisper call is in flight — drives the
-    /// "thinking" indicator in the UI.
+    /// "thinking" indicator in the UI. Backed by an internal counter
+    /// (`activeTranscribeCount`) so concurrent transcribes don't
+    /// trample each other: a stale call returning while a fresh one
+    /// is in flight no longer flips the indicator off prematurely.
     @Published private(set) var isTranscribing: Bool = false
     @Published private(set) var lastError: String?
+
+    /// Number of currently-running transcribe invocations. Always
+    /// mutated alongside `isTranscribing = (count > 0)` via
+    /// `beginTranscribe()` / `endTranscribe()` so the published
+    /// indicator reflects whether *any* transcribe is still in
+    /// flight, not just whichever one returned last.
+    private var activeTranscribeCount: Int = 0
 
     /// Authoritative per-utterance list with whisper's absolute
     /// recording-time start/end. The live view renders one line per
@@ -89,6 +99,13 @@ final class LiveTranscriber: ObservableObject {
     private var inFlight: Task<Void, Never>?
     private var tickTask: Task<Void, Never>?
     private var language: String = "he"
+    /// Incremented on every `start()`. A `transcribeUtterance` call
+    /// captures this at entry and re-checks before mutating state —
+    /// drops the result if the user started a new recording mid-flight.
+    /// Without this, a late-arriving whisper result from recording N
+    /// appends to recording N+1's segments (user reported seeing the
+    /// previous conversation's text in a fresh recording).
+    private var epoch: Int = 0
 
     init(transcription: TranscriptionService) {
         self.transcription = transcription
@@ -110,7 +127,8 @@ final class LiveTranscriber: ObservableObject {
         self.fullText = ""
         self.segments = []
         self.lastError = nil
-        liveLog.log("LiveTranscriber.start lang=\(language, privacy: .public) chunk=\(self.chunkSeconds, privacy: .public)s window=\(self.windowSeconds, privacy: .public)s useVAD=\(self.useVAD, privacy: .public)")
+        self.epoch &+= 1
+        liveLog.log("LiveTranscriber.start lang=\(language, privacy: .public) chunk=\(self.chunkSeconds, privacy: .public)s window=\(self.windowSeconds, privacy: .public)s useVAD=\(self.useVAD, privacy: .public) epoch=\(self.epoch, privacy: .public)")
 
         if useVAD {
             let det = UtteranceDetector()
@@ -140,6 +158,34 @@ final class LiveTranscriber: ObservableObject {
         lastUtteranceTask?.cancel()
         lastUtteranceTask = nil
         return fullText
+    }
+
+    /// Bump the in-flight counter and publish `isTranscribing = true`.
+    /// Pair with `endTranscribe()` (typically via `defer`) so the count
+    /// stays balanced even on early returns. Reads as `true` whenever
+    /// at least one transcribe is running, which is what the UI's
+    /// "thinking" indicator actually wants.
+    ///
+    /// Exposed as `internal` (not `private`) so the unit tests can
+    /// drive overlapping-transcribe scenarios deterministically — the
+    /// natural in-flight overlap is hard to reproduce against the
+    /// stub engine because cancellation collapses the simulated
+    /// delay before the test can interleave a second call.
+    func beginTranscribe() {
+        activeTranscribeCount += 1
+        if !isTranscribing { isTranscribing = true }
+    }
+
+    /// Decrement the in-flight counter and publish
+    /// `isTranscribing = false` only when the count hits zero. Without
+    /// this, a stale transcribe finishing while a fresh one is still
+    /// running would flip the indicator off and the UI would falsely
+    /// show "idle" mid-recording.
+    func endTranscribe() {
+        activeTranscribeCount = max(0, activeTranscribeCount - 1)
+        if activeTranscribeCount == 0, isTranscribing {
+            isTranscribing = false
+        }
     }
 
     func ingest(_ samples: ArraySlice<Float>) {
@@ -228,17 +274,38 @@ final class LiveTranscriber: ObservableObject {
     /// utterances chain on top of the previous task so whisper runs
     /// strictly serially (the engine actor enforces this anyway, but
     /// the chain also keeps the publish order stable).
+    ///
+    /// `epoch` is captured RIGHT HERE at schedule time — i.e. at the
+    /// moment the VAD emitted the utterance, while we still know the
+    /// audio belongs to the current recording. If we waited until
+    /// `transcribeUtterance` actually started running (potentially
+    /// after a fresh recording incremented the epoch), we'd compare
+    /// the stale audio against the new recording's epoch and the
+    /// guard would falsely pass.
     private func scheduleUtteranceTranscribe(samples: [Float], startSec: Double) {
+        let scheduledEpoch = epoch
         let prev = lastUtteranceTask
         lastUtteranceTask = Task { @MainActor [weak self] in
             await prev?.value
-            await self?.transcribeUtterance(samples: samples, startSec: startSec)
+            await self?.transcribeUtterance(samples: samples,
+                                            startSec: startSec,
+                                            scheduledEpoch: scheduledEpoch)
         }
     }
 
-    private func transcribeUtterance(samples: [Float], startSec: Double) async {
-        isTranscribing = true
-        defer { isTranscribing = false }
+    private func transcribeUtterance(samples: [Float], startSec: Double, scheduledEpoch: Int) async {
+        // Stale-result drop, applied BEFORE the diarizer feed so we
+        // don't pollute the new recording's speaker intervals with
+        // embeddings derived from the previous recording's audio. The
+        // old placement of this guard (after whisper returned) only
+        // protected the segment append; the diarizer's queue still
+        // got fed for stale audio, leaking speakers across recordings.
+        guard scheduledEpoch == epoch else {
+            liveLog.log("LiveTranscriber utterance dropped at entry — epoch changed (scheduled=\(scheduledEpoch, privacy: .public) current=\(self.epoch, privacy: .public))")
+            return
+        }
+        beginTranscribe()
+        defer { endTranscribe() }
         // Hand the same utterance to the speaker diarizer in parallel
         // with whisper. The diarizer maintains its own pool of speaker
         // centroids; the matching back to segments happens via
@@ -261,10 +328,25 @@ final class LiveTranscriber: ObservableObject {
             padded = samples
         }
         let startedAt = Date()
-        let whisperSegs = await transcription.transcribeOnceSegments(samples: padded, language: language)
+        // VAD-bounded short utterances: use the WhisperEngine.computeAudioCtx
+        // formula (`audioCtx: nil`). This is the path the labelled-fixture
+        // sweep validated — see WhisperEngine.swift's `params.audio_ctx` block.
+        let whisperSegs = await transcription.transcribeOnceSegments(
+            samples: padded, language: language, audioCtx: nil
+        )
         let elapsed = Date().timeIntervalSince(startedAt)
-        liveLog.log("LiveTranscriber utterance: samples=\(samples.count) padded=\(padded.count) elapsed=\(elapsed, privacy: .public)s segments=\(whisperSegs.count) startSec=\(startSec, privacy: .public)")
+        liveLog.log("LiveTranscriber utterance: samples=\(samples.count) padded=\(padded.count) elapsed=\(elapsed, privacy: .public)s segments=\(whisperSegs.count) startSec=\(startSec, privacy: .public) epoch=\(scheduledEpoch, privacy: .public) currentEpoch=\(self.epoch, privacy: .public)")
         guard !whisperSegs.isEmpty else { return }
+
+        // Second epoch check post-whisper: the entry check covered the
+        // diarizer feed, but the user could still have started a new
+        // recording between then and now (whisper takes seconds), in
+        // which case we must drop the segment to avoid bleeding the
+        // previous conversation into the fresh transcript.
+        guard scheduledEpoch == self.epoch else {
+            liveLog.log("LiveTranscriber utterance dropped post-whisper — epoch changed (scheduled=\(scheduledEpoch, privacy: .public) current=\(self.epoch, privacy: .public))")
+            return
+        }
 
         // VAD utterances are non-overlapping by construction, so we
         // just append — no merge dedup needed. Drop segments that
@@ -309,8 +391,8 @@ final class LiveTranscriber: ObservableObject {
             liveLog.log("LiveTranscriber.runOnce SKIP: buffer=\(total) < \(minSamples) samples")
             return
         }
-        isTranscribing = true
-        defer { isTranscribing = false }
+        beginTranscribe()
+        defer { endTranscribe() }
 
         let windowSamples = Int(windowSeconds * sampleRate)
         let windowStartIndex = max(0, total - windowSamples)
@@ -318,7 +400,14 @@ final class LiveTranscriber: ObservableObject {
         let slice = Array(buffer[windowStartIndex..<total])
 
         let startedAt = Date()
-        let whisperSegs = await transcription.transcribeOnceSegments(samples: slice, language: language)
+        // Non-VAD fixed-window tick (legacy chunked live path). The slice is
+        // up to `windowSeconds` (= 30s default) of audio, not a VAD-bounded
+        // utterance, so the labelled-fixture sweep doesn't cover it. Opt out
+        // of the audio_ctx truncation; whisper's default 1500-token ctx
+        // applies.
+        let whisperSegs = await transcription.transcribeOnceSegments(
+            samples: slice, language: language, audioCtx: 0
+        )
         let elapsed = Date().timeIntervalSince(startedAt)
         liveLog.log("LiveTranscriber tick: samples=\(slice.count) elapsed=\(elapsed, privacy: .public)s segments=\(whisperSegs.count) lang=\(self.language, privacy: .public)")
         guard !whisperSegs.isEmpty else { return }

@@ -1,4 +1,4 @@
-.PHONY: all bootstrap project open build test run clean models help dmg release-build e2e package-test bundle-diarization
+.PHONY: all bootstrap project open build test run clean models models-coreml-tiny help dmg release-build e2e package-test bundle-diarization
 
 XCODEPROJ := Mila.xcodeproj
 SCHEME := Mila
@@ -23,6 +23,7 @@ help:
 	@echo "  test          - Run the MilaTests XCTest target"
 	@echo "  run           - Build and launch the app"
 	@echo "  models        - Pre-download both ggml models into ~/Library/Application Support/Mila/Models"
+	@echo "  models-coreml-tiny - Download ggml-tiny + sibling -encoder.mlmodelc into ~/.cache/whisper-coreml-test/ (for CI ANE verification test)"
 	@echo "  dmg           - Build a release DMG ($(DMG)) suitable for upload"
 	@echo "  e2e           - Run E2E transcription tests (requires ggml-tiny.bin)"
 	@echo "  package-test  - Run TranscriptionCore package unit tests"
@@ -73,6 +74,28 @@ e2e:
 		--model $(HOME)/.cache/whisper-models/ggml-tiny.bin \
 		--fixtures Fixtures \
 		--max-wer 0.3
+
+# Download `ggml-tiny.bin` + sibling `ggml-tiny-encoder.mlmodelc` for the
+# CoreML/ANE verification test (`WhisperEngineCoreMLTests`). Both go to
+# `~/.cache/whisper-coreml-test/` so a CI cache step can persist them
+# across runs. The .bin is ~75 MB; the .mlmodelc.zip is ~40 MB.
+COREML_TEST_DIR := $(HOME)/.cache/whisper-coreml-test
+models-coreml-tiny:
+	@mkdir -p "$(COREML_TEST_DIR)"
+	@if [ ! -f "$(COREML_TEST_DIR)/ggml-tiny.bin" ]; then \
+		echo "Downloading ggml-tiny.bin (~75MB)..."; \
+		curl -L --fail --progress-bar \
+			"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin" \
+			-o "$(COREML_TEST_DIR)/ggml-tiny.bin"; \
+	fi
+	@if [ ! -d "$(COREML_TEST_DIR)/ggml-tiny-encoder.mlmodelc" ]; then \
+		echo "Downloading ggml-tiny-encoder.mlmodelc.zip (~40MB)..."; \
+		curl -L --fail --progress-bar \
+			"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-encoder.mlmodelc.zip" \
+			-o "$(COREML_TEST_DIR)/ggml-tiny-encoder.mlmodelc.zip"; \
+		cd "$(COREML_TEST_DIR)" && unzip -q ggml-tiny-encoder.mlmodelc.zip && rm -rf __MACOSX ggml-tiny-encoder.mlmodelc.zip; \
+	fi
+	@echo "Ready: $(COREML_TEST_DIR)/ggml-tiny.bin (+ sibling .mlmodelc)"
 
 package-test:
 	cd Packages/TranscriptionCore && swift test

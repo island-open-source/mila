@@ -922,17 +922,30 @@ private struct LiveAISettingsTab: View {
     /// so taking the user's settings back to a fast Mac restores the
     /// previous state without surprises.
     private var hardwareDisabledNotice: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.circle.fill")
-                .foregroundStyle(.orange)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Disabled on this Mac")
-                    .font(.callout.weight(.semibold))
-                Text("MacBook Air — Live AI is too slow on Air-class chips. Recordings will still transcribe in the background.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Disabled on this Mac")
+                        .font(.callout.weight(.semibold))
+                    Text("MacBook Air — Live AI was too slow on Air-class chips when this gate was added. With Apple Neural Engine encoder offload it may now keep up. Recordings still transcribe in the background regardless.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
+            Toggle(isOn: $settings.forceLiveAIOnLowEndHardware) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Try Live AI anyway")
+                        .font(.callout)
+                    Text("Override the hardware gate. If transcription lags behind, disable this and use background mode instead.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1043,6 +1056,15 @@ private struct LiveAISettingsTab: View {
                     Toggle("Auto-segment by silence (beta)", isOn: $settings.useVAD)
                         .font(.callout.weight(.semibold))
                     Text("Detect natural pauses (≥400ms silence) and run whisper once per utterance instead of on a fixed timer. Lower latency, cleaner word boundaries. Force-cut at 25s for monologue speakers.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Background mode (hide live pane)", isOn: $settings.backgroundMode)
+                        .font(.callout.weight(.semibold))
+                    Text("Stay on the Home screen during recording. Transcription, speaker labels, and Live AI summary still run in the background and are saved when you stop. Useful on lower-power Macs where rendering the live pane competes with whisper for CPU.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

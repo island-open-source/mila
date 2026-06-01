@@ -20,25 +20,48 @@ actor StubWhisperEngine: TranscribingEngine {
     var defaultDelay: Double = 0
     /// If non-nil at the time of the next call, that call throws.
     var nextError: Error?
+    /// Simulated `loadIfNeeded` duration. When > 0, `loadIfNeeded`
+    /// invokes the `preparationObserver` with `true`, sleeps, then
+    /// invokes it with `false` — mirrors the real engine's behaviour
+    /// on a first-time CoreML compile. Used by the preparing-state
+    /// regression test in `TranscriptionServicePrewarmTests`.
+    var loadDelay: Double = 0
+    /// Status string surfaced through the preparation observer. Lets
+    /// a test assert that the engine-supplied caption reaches the UI.
+    var loadPreparationStatus: String? = "Preparing Neural Engine…"
 
     // MARK: - Recorded outputs
 
     private(set) var loadedModel: URL?
     private(set) var loadCallCount = 0
-    private(set) var transcribeCalls: [(samples: [Float], language: String)] = []
+    private(set) var transcribeCalls: [(samples: [Float], language: String, audioCtx: Int32?)] = []
     private(set) var concurrentInFlight = 0
     private(set) var maxConcurrentInFlight = 0
     private(set) var shutdownCount = 0
+
+    // MARK: - Preparation observer
+
+    private var preparationObserver: (@Sendable (Bool, String?) -> Void)?
+
+    func setPreparationObserver(_ observer: (@Sendable (Bool, String?) -> Void)?) {
+        self.preparationObserver = observer
+    }
 
     // MARK: - TranscribingEngine
 
     func loadIfNeeded(modelURL: URL, displayName: String) async throws {
         loadCallCount += 1
         loadedModel = modelURL
+        if loadDelay > 0 {
+            preparationObserver?(true, loadPreparationStatus)
+            try? await Task.sleep(nanoseconds: UInt64(loadDelay * 1_000_000_000))
+            preparationObserver?(false, nil)
+        }
     }
 
     func transcribe(samples: [Float],
                     language: String,
+                    audioCtx: Int32?,
                     progress: (@Sendable (Float) -> Void)?,
                     isCancelled: (@Sendable () -> Bool)?) async throws -> [TranscriptSegment] {
         if let err = nextError {
@@ -50,7 +73,7 @@ actor StubWhisperEngine: TranscribingEngine {
         maxConcurrentInFlight = max(maxConcurrentInFlight, concurrentInFlight)
         defer { concurrentInFlight -= 1 }
 
-        transcribeCalls.append((samples: samples, language: language))
+        transcribeCalls.append((samples: samples, language: language, audioCtx: audioCtx))
 
         let delay = delayQueue.isEmpty ? defaultDelay : delayQueue.removeFirst()
         if delay > 0 {
@@ -83,6 +106,8 @@ actor StubWhisperEngine: TranscribingEngine {
     func setDelayQueue(_ q: [Double]) { delayQueue = q }
     func setDefaultDelay(_ d: Double) { defaultDelay = d }
     func setNextError(_ e: Error?) { nextError = e }
+    func setLoadDelay(_ d: Double) { loadDelay = d }
+    func setLoadPreparationStatus(_ s: String?) { loadPreparationStatus = s }
     func resetRecording() {
         loadCallCount = 0
         loadedModel = nil

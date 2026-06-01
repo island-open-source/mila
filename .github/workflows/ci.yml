@@ -47,6 +47,21 @@ jobs:
         if: steps.diar-bundle-cache.outputs.cache-hit != 'true'
         run: make bundle-diarization
 
+      # Cache ggml-tiny.bin + sibling ggml-tiny-encoder.mlmodelc for the
+      # CoreML/ANE verification test (`WhisperEngineCoreMLTests`). Both
+      # files together are ~115 MB; the cache makes the download a
+      # cold-path-only cost.
+      - name: Cache whisper tiny + CoreML encoder
+        id: tiny-coreml-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/whisper-coreml-test
+          key: whisper-tiny-coreml-v1
+
+      - name: Download ggml-tiny + sibling -encoder.mlmodelc (cold path only)
+        if: steps.tiny-coreml-cache.outputs.cache-hit != 'true'
+        run: make models-coreml-tiny
+
       - name: Generate Xcode project
         run: make project
 
@@ -84,6 +99,23 @@ jobs:
         # hosted runners (see ios-tests.yml for the full explanation);
         # gating CI on them would mean a permanently red status, which
         # is worse than no UI-test signal at all.
+        #
+        # MILA_COREML_E2E + MILA_COREML_MODEL unblock
+        # `WhisperEngineCoreMLTests`, which verifies that whisper.cpp's
+        # CoreML/ANE encoder offload actually engages (asserted via
+        # whisper.cpp's own init-log lines). Failing here means a code
+        # path broke the CoreML wiring even though the build still
+        # links CoreML.framework.
+        env:
+          # xcodebuild strips the `TEST_RUNNER_` prefix and forwards the
+          # remainder into the test process's environment. This is the
+          # reliable propagation path for both XCUITest UI tests and
+          # plain unit tests — empirically, the un-prefixed pattern that
+          # some other workflows in this repo use does NOT propagate
+          # (the test was XCTSkip'd in the first run on this PR even
+          # though the step-level env was clearly set).
+          TEST_RUNNER_MILA_COREML_E2E: "1"
+          TEST_RUNNER_MILA_COREML_MODEL: "/Users/runner/.cache/whisper-coreml-test/ggml-tiny.bin"
         run: |
           set -o pipefail
           xcodebuild \

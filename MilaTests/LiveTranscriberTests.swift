@@ -285,6 +285,76 @@ final class LiveTranscriberTests: XCTestCase {
 
     // MARK: - Legacy API shape (no-op in segment model)
 
+    /// REGRESSION (PR #32 follow-up — Bugbot Finding #2, "stale
+    /// transcribeUtterance.defer flips isTranscribing to false during
+    /// a new recording's transcribe"):
+    ///
+    /// When two transcribes overlap in time — a stale one finishing
+    /// while a fresh one is mid-whisper — the older defer must not
+    /// flip the UI's "thinking" indicator off. With the previous
+    /// `isTranscribing = true; defer { isTranscribing = false }`
+    /// pattern, the stale defer would race the active transcribe and
+    /// the indicator would go dark spuriously. The counter-backed
+    /// `beginTranscribe`/`endTranscribe` pair fixes that: the bool
+    /// only flips false when the count reaches zero.
+    ///
+    /// Test strategy: drive two concurrent VAD-path transcribes by
+    /// starting recording A with a slow whisper, then calling start()
+    /// again (new epoch) and feeding B before A's whisper returns.
+    /// Both transcribes will be in flight at once; the stale A's
+    /// `defer { endTranscribe() }` must not flip `isTranscribing`
+    /// false while B is still running.
+    func test_isTranscribing_stays_true_when_stale_transcribe_overlaps_fresh_one() {
+        // Direct unit test of the counter-backed indicator. Driving
+        // the actual overlap through the public API is hard because
+        // the stub engine collapses its simulated delay on Task
+        // cancellation, so a stale transcribe always completes
+        // before a fresh one can start. The counter logic is the
+        // load-bearing piece — it's what guarantees a stale defer
+        // can't flip the indicator off while a fresh transcribe is
+        // running — so we drive begin / end directly.
+        XCTAssertFalse(transcriber.isTranscribing)
+
+        // -- "Stale" transcribe A begins --
+        transcriber.beginTranscribe()
+        XCTAssertTrue(transcriber.isTranscribing,
+                      "First begin should publish isTranscribing = true")
+
+        // -- "Fresh" transcribe B begins WHILE A is still running --
+        transcriber.beginTranscribe()
+        XCTAssertTrue(transcriber.isTranscribing,
+                      "Second begin should keep isTranscribing = true (count=2)")
+
+        // -- A's stale defer fires (the bug-shape: would flip the
+        //    indicator off under the old `defer { isTranscribing = false }`) --
+        transcriber.endTranscribe()
+        XCTAssertTrue(transcriber.isTranscribing,
+                      "Stale defer must NOT flip indicator off while a fresh transcribe is in flight — this is the regression Finding #2 caught")
+
+        // -- B finishes --
+        transcriber.endTranscribe()
+        XCTAssertFalse(transcriber.isTranscribing,
+                       "Once all transcribes have ended, indicator should clear")
+    }
+
+    /// Belt-and-suspenders: an extra `endTranscribe` (from a stale
+    /// task somehow firing its defer twice, or a count drift) must
+    /// not push the counter negative or stick the indicator on.
+    func test_endTranscribe_does_not_go_negative() {
+        XCTAssertFalse(transcriber.isTranscribing)
+        transcriber.endTranscribe()
+        XCTAssertFalse(transcriber.isTranscribing)
+        transcriber.beginTranscribe()
+        transcriber.endTranscribe()
+        transcriber.endTranscribe()  // extra — must be a no-op
+        XCTAssertFalse(transcriber.isTranscribing)
+        // A fresh begin after the spurious end must still flip true.
+        transcriber.beginTranscribe()
+        XCTAssertTrue(transcriber.isTranscribing)
+        transcriber.endTranscribe()
+        XCTAssertFalse(transcriber.isTranscribing)
+    }
+
     func test_applySpeakerLabels_is_a_noop_in_live_mode() async {
         let samples = Array(repeating: Float(0.3), count: 32_000)
         transcriber.start(language: "en")

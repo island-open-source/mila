@@ -308,6 +308,7 @@ struct MilaApp: App {
                 .environmentObject(liveAISession)
                 .frame(minWidth: 1000, minHeight: 640)
                 .task { ensureDefaultModelsInstalled() }
+                .task { prewarmDefaultModel() }
                 .task { await diarizationSettings.runHealthCheck() }
                 .task { await diarizationSettings.runStartupCheckDepsIfNeeded() }
                 .task { await diarizationSettings.startAutoBootstrapIfNeeded() }
@@ -670,35 +671,61 @@ struct MilaApp: App {
         let diarSettings = diarizationSettings
         let langSettings = languageSettings
         let sessionRef = session
+        // `actions` captured weakly so the .idle handler can read
+        // its `isFinalizingRecording` flag to decide whether the
+        // drain belongs here (sleep/lock/quit path) or to
+        // `stopRecording` (Stop-button path).
+        let actionsRef: QuickActionsController? = actions
 
         var feedTask: Task<Void, Never>?
         var aiEnabledCancellable: AnyCancellable?
 
-        // Hardware gate: on Macs below the Live AI bar (currently:
-        // MacBook Air), skip the entire live pipeline. The recording
-        // itself still runs — `RecordingSession` writes the WAV
-        // regardless — and `QuickActionsController` enqueues a
-        // post-record transcription on stop, so the user gets a
-        // normal recording + background transcribe. We just don't
-        // spin up the live transcriber, diarizer, or AI session,
-        // which would burn CPU on a machine that can't keep up with
-        // them in real time. The early return is safe because the
-        // hardware decision is fixed for the lifetime of the
-        // process — sysctl values don't change at runtime.
+        // Hardware gate: re-checked PER-RECORDING (not at function
+        // level) so the user can toggle `forceLiveAIOnLowEndHardware`
+        // mid-session and have the next recording pick up the change.
+        // The old function-level early-return meant flipping the
+        // override required an app relaunch (flagged by Cursor on
+        // baeeb8c: "wireLiveAIPipeline runs once at launch and returns
+        // immediately when isLiveAIAvailable is false. Toggling
+        // forceLiveAIOnLowEndHardware updates isLiveAIAvailable but
+        // never starts the session observer").
         //
-        // UI-test exception: handled centrally in `MilaApp.init()` by
-        // injecting a non-Air `SystemCapabilities` into `LiveAISettings`
-        // when the relevant launch arg is present, so
-        // `isLiveAIAvailable` is already true here.
-        guard aiSettings.isLiveAIAvailable else {
-            os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
-                .log("wireLiveAIPipeline: skipped — hardware below Live AI bar (model=\(aiSettings.capabilities.marketingName, privacy: .public))")
-            return
-        }
+        // The state observer below runs forever now; the `.recording`
+        // branch is where we gate on `aiSettings.isLiveAIAvailable`.
 
         for await state in sessionRef.$state.values {
             switch state {
             case .recording:
+                guard aiSettings.isLiveAIAvailable else {
+                    // Hardware below the Live AI bar AND no override
+                    // flipped. Recording still runs via RecordingSession;
+                    // QuickActionsController enqueues a post-record
+                    // transcribe on stop. We just skip the live
+                    // pipeline setup.
+                    //
+                    // BUT: clear the transcriber's `segments` /
+                    // `useVAD` first. Without this, a stale live
+                    // transcript from a previous recording (when the
+                    // user had the override toggle on) would still be
+                    // sitting in memory; `stopRecording` would
+                    // snapshot it onto the new recording and could
+                    // mark it `.completed` without ever running batch
+                    // transcription. Cursor flagged on 62e1c3b.
+                    _ = transcriber.stop()
+                    sessionRef.onLiveSamples = nil
+                    // Also clear LiveAISession so its rolling `summary`
+                    // and `actionItems` from a previous override-enabled
+                    // recording don't leak onto this gated capture.
+                    // `stopRecording` reads aiSession.summary /
+                    // actionItems unconditionally; without this reset,
+                    // a previous Live AI session's output would attach
+                    // to a recording that never ran the LLM loop.
+                    // Cursor flagged on c95d2bb.
+                    aiSession.cancel()
+                    os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+                        .log("wireLiveAIPipeline: .recording skipped — hardware below Live AI bar (model=\(aiSettings.capabilities.marketingName, privacy: .public))")
+                    continue
+                }
                 // Live transcription runs on every recording — it's how
                 // the recording UI shows the live transcript pane even
                 // when AI mode is off. Apply the user's tick-interval
@@ -804,37 +831,50 @@ struct MilaApp: App {
                 feedTask = nil
                 aiEnabledCancellable?.cancel()
                 aiEnabledCancellable = nil
-                // Force one last whisper pass on whatever's in the
-                // buffer so the tail of the meeting (up to ~chunkSeconds
-                // since the previous tick) makes it into the live pane
-                // and the saved Live AI snapshot. The tick task's
-                // sleep loop would otherwise let this audio sit
-                // un-transcribed.
-                await transcriber.transcribeNow()
-                // Same idea for the LLM: if new segments just landed
-                // and Live AI is on, push one final feed so the
-                // recording's stored summary/items reflect the tail.
-                if aiSettings.enabled && llmSettingsRef.isConfigured {
-                    let text = transcriber.formattedTranscript
-                    if !text.isEmpty {
-                        aiSession.feed(transcript: text)
+                // Coordination with QuickActionsController.stopRecording:
+                // when the user hits the Stop button, stopRecording
+                // sets `isFinalizingRecording = true` and runs an
+                // inline drain (transcribeNow + LLM feed +
+                // diarizer.awaitPending + applySpeakerLabels) so it
+                // can snapshot final state, write the saved
+                // Recording, and only THEN tear down the live
+                // pipelines. If we ran the drain here too, the two
+                // paths would race — `transcriber.stop()` could fire
+                // before stopRecording reads `liveTranscriber?.
+                // segments`, wiping the snapshot to empty.
+                //
+                // So: when stopRecording owns the lifecycle, this
+                // handler does only session-level cleanup (clear
+                // onLiveSamples). When stopRecording is NOT the
+                // trigger — sleep / lock-screen / app-quit /
+                // cancelAll — we run the full drain here so the
+                // tail doesn't get lost.
+                let stopRecordingOwnsFinalize = actionsRef?.isFinalizingRecording == true
+                if !stopRecordingOwnsFinalize {
+                    // Force one last whisper pass on whatever's in
+                    // the buffer so the tail of the meeting (up to
+                    // ~chunkSeconds since the previous tick) makes
+                    // it into the live pane and the saved Live AI
+                    // snapshot.
+                    await transcriber.transcribeNow()
+                    // Same idea for the LLM: if new segments just
+                    // landed and Live AI is on, push one final feed.
+                    if aiSettings.enabled && llmSettingsRef.isConfigured {
+                        let text = transcriber.formattedTranscript
+                        if !text.isEmpty {
+                            aiSession.feed(transcript: text)
+                        }
                     }
+                    _ = transcriber.stop()
+                    // Drain the diarizer's chained background work
+                    // BEFORE killing the daemon. The daemon stays
+                    // alive until every queued embed has landed; if
+                    // we stop()'d first, pending continuations would
+                    // resume with `error: "stopped"` and the final
+                    // utterance would lose its speaker label.
+                    await diarizer.awaitPending()
+                    diarizer.stop()
                 }
-                _ = transcriber.stop()
-                // Drain the diarizer's chained background work BEFORE
-                // killing the daemon. `stopRecording` also awaits this,
-                // but it runs concurrently on the @MainActor — if the
-                // `.idle` handler reaches `diarizer.stop()` first, the
-                // daemon process is terminated and the in-flight
-                // continuation in `pending` resumes with
-                // `error: "stopped"`, so `process(...)` skips
-                // appending the final utterance's interval and the
-                // final speaker label is permanently lost. Awaiting
-                // the queue here means the daemon stays alive until
-                // every queued embed has landed; stopRecording's
-                // duplicate `awaitPending` is then a no-op.
-                await diarizer.awaitPending()
-                diarizer.stop()
                 // Note: don't cancel aiSession here — QuickActionsController
                 // still needs to read .summary and .actionItems out of
                 // it when assembling the saved Recording. The next
@@ -848,10 +888,15 @@ struct MilaApp: App {
     /// Crash-recovery sweep + stale-status cleanup. Two things happen
     /// here at launch:
     ///   1. Any recording left in `.running` from a previous session
-    ///      (the app died while whisper was mid-transcription) is
-    ///      reset to `.failed`. Without this, the Queue view's
-    ///      "still-pending fallback" keeps showing those rows forever
-    ///      because the worker never publishes them.
+    ///      (the app died while whisper was mid-transcription OR while
+    ///      the stop-time live-drain in `QuickActionsController` was
+    ///      still in flight) is reset to `.pending` and re-enqueued for
+    ///      transcription — provided its `.wav` is still on disk.
+    ///      Without re-enqueue, the row would sit in `.running` forever
+    ///      (the worker never publishes it on the new process) and the
+    ///      Queue view's "still-pending fallback" keeps showing it.
+    ///      If the WAV is gone we fall back to `.failed` so the row
+    ///      doesn't loop forever trying to read a missing file.
     ///   2. Orphan .wav files re-attached by RecordingStore as
     ///      `.pending` are enqueued for transcription so the user
     ///      gets a usable transcript on the next launch without
@@ -864,11 +909,24 @@ struct MilaApp: App {
         // 1. Reset stale .running recordings. The current process
         //    hasn't started its worker loop yet — anything still
         //    flagged .running must be a leftover.
+        let fm = FileManager.default
         for recording in store.recordings where recording.status == .running {
+            let wavURL = store.audioURL(for: recording)
             var fixed = recording
-            fixed.status = .failed
-            store.update(fixed)
-            print("MilaApp: reset stale .running recording \(recording.audioFileName) to .failed")
+            if fm.fileExists(atPath: wavURL.path) {
+                // Stop-time drain or batch worker died mid-transcription;
+                // the audio is still on disk, so re-queue for a fresh
+                // batch run instead of stranding the row at `.failed`
+                // (which has no recovery path the user can self-serve).
+                fixed.status = .pending
+                store.update(fixed)
+                print("MilaApp: re-enqueuing stale .running recording \(recording.audioFileName)")
+                transcription.enqueue(fixed)
+            } else {
+                fixed.status = .failed
+                store.update(fixed)
+                print("MilaApp: reset stale .running recording \(recording.audioFileName) to .failed (WAV missing)")
+            }
         }
 
         // 2. Auto-enqueue recovered orphans.
@@ -879,6 +937,19 @@ struct MilaApp: App {
             print("MilaApp: re-enqueuing recovered recording \(recording.audioFileName)")
             transcription.enqueue(recording)
         }
+    }
+
+    /// Kick the engine's `loadIfNeeded` on the user's default model
+    /// once at launch. The first time whisper.cpp loads a model with
+    /// a sibling `-encoder.mlmodelc` on a given device, CoreML
+    /// compiles the mlmodelc for that hardware — ~13s peg on M-series
+    /// the very first time, then fully cached. Doing this at launch
+    /// (rather than on the user's first Record press) means the
+    /// preparation banner shows BEFORE the user reaches for the
+    /// button, and any too-eager Record press during the window finds
+    /// the model already loaded.
+    private func prewarmDefaultModel() {
+        transcription.prewarm(language: languageSettings.current.rawValue)
     }
 
     /// Pre-download the two default models on first launch:
@@ -894,6 +965,12 @@ struct MilaApp: App {
                 modelManager.download(model)
             }
         }
+        // Pick up any sibling `-encoder.mlmodelc` that's missing for an
+        // already-installed `.bin`. New users get the CoreML zip via the
+        // post-`.bin`-install hook in ModelManager; this catches the
+        // upgrade case (existing 1.7 users who already have the .bin on
+        // disk from a previous run).
+        modelManager.ensureCoreMLInstalled()
     }
 }
 

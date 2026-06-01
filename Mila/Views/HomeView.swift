@@ -12,6 +12,11 @@ struct HomeView: View {
     @EnvironmentObject private var hotkeys: HotkeySettings
     @EnvironmentObject private var liveAISettings: LiveAISettings
     @EnvironmentObject private var llmSettings: LLMSettings
+    /// Observed so the Record button can show a one-time-setup
+    /// spinner while CoreML compiles the encoder mlmodelc (~13s on
+    /// M-series the very first time). See
+    /// `TranscriptionService.isPreparingModel`.
+    @EnvironmentObject private var transcription: TranscriptionService
 
     @Binding var selection: SidebarSelection?
     let search: String
@@ -74,6 +79,9 @@ struct HomeView: View {
     private var heroAction: some View {
         HeroRecordButton(
             isRecording: isRecording,
+            isFinalizing: actions.isFinalizingRecording,
+            isPreparingModel: transcription.isPreparingModel,
+            preparationStatus: transcription.preparationStatus,
             languageFlag: languageSettings.current.flagEmoji,
             languageName: languageSettings.current.displayName,
             withSystemAudio: withSystemAudio,
@@ -82,6 +90,16 @@ struct HomeView: View {
             Task { await actions.toggleRecord(withSystemAudio: withSystemAudio) }
         }
         .frame(maxWidth: 460)
+        // Belt-and-suspenders with the controller-side guard: greying
+        // out the button gives the user immediate visual feedback that
+        // a tap during the drain won't do anything, instead of just
+        // silently swallowing it.
+        //
+        // Same idea for the first-time CoreML compile: a record press
+        // during the compile window would start a recording the encoder
+        // can't yet transcribe (segments=0). Block the button until the
+        // engine reports ready.
+        .disabled(actions.isFinalizingRecording || transcription.isPreparingModel)
     }
 
     /// Small toggle below the Record button. Default-on. Disabled while
@@ -149,6 +167,22 @@ struct HomeView: View {
 /// circle — once you're recording you want it loud and unmissable.
 private struct HeroRecordButton: View {
     let isRecording: Bool
+    /// True while `stopRecording`'s inline drain is running. The button
+    /// is `.disabled` in this state (set by the caller) but we also want
+    /// the visible title/caption to say "Finalizing…" so the user
+    /// understands why pressing it again doesn't do anything.
+    let isFinalizing: Bool
+    /// True while the whisper engine is doing a noticeable first-time
+    /// load — currently only the first CoreML compile of a sibling
+    /// `-encoder.mlmodelc`. The button is disabled by the caller in
+    /// this state and we relabel it ("Preparing Neural Engine…") plus
+    /// show a spinner so the user knows the wait is one-time and
+    /// progress is being made.
+    let isPreparingModel: Bool
+    /// Optional human-readable line the engine asked us to show
+    /// alongside the spinner (e.g. "Preparing Neural Engine
+    /// (one-time setup)…"). Falls back to a sensible default when nil.
+    let preparationStatus: String?
     let languageFlag: String
     let languageName: String
     let withSystemAudio: Bool
@@ -169,7 +203,16 @@ private struct HeroRecordButton: View {
                     Circle()
                         .fill(iconCircleFill)
                         .frame(width: 56, height: 56)
-                    if isRecording {
+                    if isPreparingModel {
+                        // First-time CoreML compile in flight. Show an
+                        // indeterminate spinner inside the icon circle
+                        // — same footprint as the mic glyph so the
+                        // layout doesn't jump when state flips.
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .controlSize(.small)
+                            .accessibilityIdentifier("home.record.preparing.spinner")
+                    } else if isRecording {
                         Circle()
                             .stroke(Color.white.opacity(0.5), lineWidth: 2)
                             .frame(width: 56, height: 56)
@@ -263,11 +306,22 @@ private struct HeroRecordButton: View {
     }
 
     private var titleText: String {
+        if isPreparingModel { return "Preparing AI…" }
+        if isFinalizing { return "Finalizing…" }
         if isRecording { return "Recording…" }
         return liveAIEnabled ? "Transcribe and Summarize" : "Transcribe"
     }
 
     private var captionText: String {
+        if isPreparingModel {
+            // Engine-provided status takes precedence so the copy can
+            // evolve without a UI change. The fallback covers the
+            // "engine said preparing but didn't supply a string" case.
+            return preparationStatus ?? "One-time setup (about 15 seconds)…"
+        }
+        if isFinalizing {
+            return "Saving transcript…"
+        }
         if isRecording {
             return "Tap to stop"
         }

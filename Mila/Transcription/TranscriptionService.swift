@@ -19,6 +19,19 @@ final class TranscriptionService: ObservableObject {
     @Published private(set) var progress: Double = 0
     @Published var lastError: String?
 
+    /// True while the underlying whisper engine is doing a "noticeable"
+    /// first-time load — currently means a sibling `-encoder.mlmodelc`
+    /// is being compiled by CoreML for this device (~13s on M-series
+    /// the very first time). The engine notifies us via a callback;
+    /// we bridge to `@MainActor` so SwiftUI views can gate the Record
+    /// button on this state. See `HomeView`'s preparation banner.
+    @Published private(set) var isPreparingModel: Bool = false
+
+    /// Human-readable status string the engine wants the UI to show
+    /// alongside the spinner ("Preparing Neural Engine…"). `nil` when
+    /// not preparing or when the engine didn't supply one.
+    @Published private(set) var preparationStatus: String?
+
     /// Audio shorter than this is treated as "no recording" — Whisper happily
     /// hallucinates confident transcripts from sub-100ms noise.
     static let minimumAudioDurationSeconds: Double = 0.3
@@ -60,6 +73,18 @@ final class TranscriptionService: ObservableObject {
     /// data race under strict concurrency.
     private let cancellation = CancellationFlag()
 
+    /// Tracks the in-flight observer registration. Held so the prewarm
+    /// path can `await` it before kicking off the first `loadIfNeeded`
+    /// — without that gate, an early prewarm could begin compiling the
+    /// CoreML encoder before the observer is installed on the engine
+    /// actor, and `isPreparingModel` would never flip to `true`. The
+    /// Record button would stay enabled and the user could start a
+    /// recording while the encoder was still cold (PR #32 / Bugbot #3).
+    ///
+    /// Lazily assigned at the end of `init` — implicitly-unwrapped so
+    /// we don't need a pre-init placeholder Task.
+    private var observerSetupTask: Task<Void, Never>!
+
     init(store: RecordingStore,
          modelManager: ModelManager,
          diarizationSettings: DiarizationSettings,
@@ -68,6 +93,77 @@ final class TranscriptionService: ObservableObject {
         self.modelManager = modelManager
         self.diarizationSettings = diarizationSettings
         self.engine = engine
+        // Bridge the engine's preparation callback onto the main
+        // actor so SwiftUI subscribers see flips through `@Published`
+        // (which is itself MainActor-isolated). The closure is
+        // `@Sendable` because the engine actor invokes it from its
+        // own context.
+        //
+        // Capture the registration Task so `prewarm` (and any other
+        // entry point that calls `loadIfNeeded`) can await it before
+        // touching the engine. The engine actor would serialize calls
+        // FIFO anyway, but Task scheduling order between this Task
+        // and the prewarm Task is undefined — without the explicit
+        // await in those call sites, the first CoreML compile could
+        // fire before this observer landed.
+        let serviceRef = self
+        self.observerSetupTask = Task { [engine] in
+            await engine.setPreparationObserver { [weak serviceRef] preparing, status in
+                Task { @MainActor in
+                    guard let serviceRef else { return }
+                    serviceRef.isPreparingModel = preparing
+                    serviceRef.preparationStatus = preparing ? status : nil
+                }
+            }
+        }
+    }
+
+    // MARK: - Prewarm
+
+    /// Pre-load the user's default model in a detached task. Called
+    /// once at app launch so the first-ever CoreML compile (~13s on
+    /// M-series) happens BEFORE the user taps Record. Without this,
+    /// pressing Record during the compile window produces a recording
+    /// that yields `segments=0` because the encoder isn't ready yet.
+    ///
+    /// Failures are silent — the actual transcription path will retry
+    /// `loadIfNeeded` and surface any real error there. Best-effort.
+    ///
+    /// `language` defaults to the user's persisted recording language;
+    /// callers pass in their `RecordingLanguageSettings.current` so we
+    /// pick the model the next recording is most likely to want.
+    func prewarm(language: String) {
+        guard let model = modelManager.model(for: language),
+              modelManager.isInstalled(model) else {
+            print("TranscriptionService.prewarm: skipping — no installed model for lang=\(language)")
+            return
+        }
+        let modelURL = modelManager.url(for: model)
+        let displayName = model.displayName
+        // Capture as non-optional — `observerSetupTask` is implicitly
+        // unwrapped on the property but force-imports here would
+        // re-promote it to Optional inside the closure.
+        let observerTask: Task<Void, Never> = observerSetupTask
+        print("TranscriptionService.prewarm: kicking off load for \(displayName)")
+        Task.detached(priority: .userInitiated) { [engine] in
+            // Bugbot #3: ensure the preparation observer is registered
+            // BEFORE the first CoreML compile starts — otherwise the
+            // engine fires the "preparing" callback into a nil
+            // observer, `isPreparingModel` never flips to true, and the
+            // Record button stays enabled while the encoder is still
+            // cold. The Task in `init` serializes through the same
+            // engine actor, but await ordering between two independent
+            // Tasks is undefined, so we make it explicit here.
+            await observerTask.value
+            do {
+                try await engine.loadIfNeeded(modelURL: modelURL, displayName: displayName)
+                print("TranscriptionService.prewarm: completed for \(displayName)")
+            } catch {
+                // Silent — the real transcription call will retry and
+                // can surface any error through its own path.
+                print("TranscriptionService.prewarm: failed for \(displayName) (will retry on first use): \(error)")
+            }
+        }
     }
 
     // MARK: - Public API
@@ -107,8 +203,15 @@ final class TranscriptionService: ObservableObject {
     /// English (and anything else) goes to the OpenAI turbo. If the
     /// language-best model isn't installed yet (download still in flight),
     /// we fall back to whatever's selected so the user gets *some* transcript.
-    func transcribeOnce(samples: [Float], language: String) async -> String {
-        let segs = await transcribeOnceSegments(samples: samples, language: language)
+    ///
+    /// `audioCtx` is forwarded to the engine — see
+    /// `TranscribingEngine.transcribe` for semantics. Defaults to `0`
+    /// (= whisper default 1500 ctx) because the dictation path is the
+    /// historical caller of this method and dictation has NOT been
+    /// validated against audio_ctx truncation. Callers that want the
+    /// VAD-tuned formula must pass `nil` explicitly.
+    func transcribeOnce(samples: [Float], language: String, audioCtx: Int32? = 0) async -> String {
+        let segs = await transcribeOnceSegments(samples: samples, language: language, audioCtx: audioCtx)
         return segs.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -117,7 +220,18 @@ final class TranscriptionService: ObservableObject {
     /// can keep per-segment timing through the live loop (required for
     /// rendering one line per utterance and for matching speakers to
     /// segments by time).
-    func transcribeOnceSegments(samples: [Float], language: String) async -> [TranscriptSegment] {
+    ///
+    /// `audioCtx` is forwarded to the engine — see
+    /// `TranscribingEngine.transcribe` for semantics. Callers MUST be
+    /// explicit:
+    ///   * `LiveTranscriber` (VAD-bounded short utterances) → `nil`.
+    ///   * Dictation (full-press audio) → `0`.
+    ///   * Batch worker → never goes through here (calls `engine.transcribe`
+    ///     directly with `0`).
+    /// There is no default — the wrong choice silently degrades transcription
+    /// quality on one path or the other, so make every call site declare its
+    /// intent.
+    func transcribeOnceSegments(samples: [Float], language: String, audioCtx: Int32?) async -> [TranscriptSegment] {
         let candidate = modelManager.model(for: language)
         guard let model = candidate,
               modelManager.isInstalled(model) else {
@@ -127,11 +241,15 @@ final class TranscriptionService: ObservableObject {
         let modelURL = modelManager.url(for: model)
         let startedAt = Date()
         serviceLog.log("transcribeOnceSegments: loading model=\(model.name, privacy: .public) at \(modelURL.path, privacy: .public)")
+        // Bugbot #3: make sure the preparation observer is installed
+        // before `loadIfNeeded` — see `init` for the race.
+        await observerSetupTask.value
         do {
             try await engine.loadIfNeeded(modelURL: modelURL,
                                           displayName: model.displayName)
             let segs = try await engine.transcribe(samples: samples,
                                                    language: language,
+                                                   audioCtx: audioCtx,
                                                    progress: nil,
                                                    isCancelled: nil)
             serviceLog.log("transcribeOnceSegments: model=\(model.name, privacy: .public) lang=\(language, privacy: .public) samples=\(samples.count, privacy: .public) elapsed=\(Date().timeIntervalSince(startedAt), privacy: .public)s segs=\(segs.count, privacy: .public)")
@@ -252,6 +370,10 @@ final class TranscriptionService: ObservableObject {
 
         print("Transcribe begin: \(working.title) [\(recordingID.uuidString.prefix(8))]")
 
+        // Bugbot #3: make sure the preparation observer is installed
+        // before `loadIfNeeded` — see `init` for the race.
+        await observerSetupTask.value
+
         do {
             try await engine.loadIfNeeded(modelURL: modelManager.url(for: model),
                                           displayName: model.displayName)
@@ -311,6 +433,16 @@ final class TranscriptionService: ObservableObject {
             async let transcribeTask = engine.transcribe(
                 samples: samples,
                 language: working.language,
+                // Batch path: imported files / post-record full-WAV
+                // transcription. We don't have a labelled fixture set
+                // for this distribution (variable length, mic, noise
+                // profile), so opt out of the live-VAD-tuned audio_ctx
+                // truncation and use whisper's default 1500-token
+                // context. This is a deliberate fix from PR #32 review:
+                // applying the formula here regressed WER on the CI
+                // e2e short-clip case (en_numbers_and_dates 5.17s,
+                // 0.29 → 0.36 on ggml-tiny).
+                audioCtx: 0,
                 progress: { [weak self] p in
                     Task { @MainActor [weak self] in
                         guard let self else { return }
