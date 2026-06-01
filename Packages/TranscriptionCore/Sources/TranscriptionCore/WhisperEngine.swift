@@ -1,5 +1,56 @@
 import Foundation
 import whisper
+import os.log
+
+private let whisperLog = Logger(subsystem: "io.island.mila.TranscriptionCore", category: "whisper")
+
+/// whisper.cpp's `whisper_log_set` is a process-global single-slot
+/// callback, so capture lives at file scope rather than per-actor. Lines
+/// are only retained while `capturing == true` (during `loadIfNeeded`'s
+/// `whisper_init_from_file_with_params` call), so steady-state allocation
+/// is one empty array.
+fileprivate final class WhisperLogCapture: @unchecked Sendable {
+    static let shared = WhisperLogCapture()
+    private let lock = NSLock()
+    private var capturing = false
+    private var lines: [String] = []
+
+    /// Idempotent: safe to call multiple times. We install the callback
+    /// once on first `loadIfNeeded` so any whisper.cpp output during init
+    /// flows through us.
+    func install() {
+        whisper_log_set({ _, text, _ in
+            guard let text else { return }
+            WhisperLogCapture.shared.append(String(cString: text))
+        }, nil)
+    }
+
+    private func append(_ s: String) {
+        lock.lock()
+        if capturing { lines.append(s) }
+        lock.unlock()
+    }
+
+    func startCapture() {
+        lock.lock()
+        lines.removeAll(keepingCapacity: true)
+        capturing = true
+        lock.unlock()
+    }
+
+    func stopCapture() -> [String] {
+        lock.lock()
+        let snapshot = lines
+        capturing = false
+        lines.removeAll(keepingCapacity: false)
+        lock.unlock()
+        return snapshot
+    }
+}
+
+private let installLogCaptureOnce: Void = {
+    WhisperLogCapture.shared.install()
+}()
 
 /// Thin Swift wrapper around the whisper.cpp C API.
 /// All work happens off the main actor.
@@ -20,6 +71,11 @@ public actor WhisperEngine {
     private var loadedPath: String?
     public private(set) var modelName: String?
 
+    /// CoreML / ANE status after the most recent successful `loadIfNeeded`.
+    /// Reset to `.unavailable` before each load attempt and re-derived
+    /// from whisper.cpp's own init log lines (see `parseCoreMLStatus`).
+    public private(set) var coreMLStatus: CoreMLStatus = .unavailable
+
     public init() {}
 
     deinit {
@@ -27,12 +83,14 @@ public actor WhisperEngine {
     }
 
     public func loadIfNeeded(modelURL: URL, displayName: String) async throws {
+        _ = installLogCaptureOnce
         if loadedPath == modelURL.path { return }
         if let ctx {
             whisper_free(ctx)
             self.ctx = nil
             self.loadedPath = nil
         }
+        self.coreMLStatus = .unavailable
         var params = whisper_context_default_params()
         #if canImport(Metal)
         params.use_gpu = true
@@ -42,14 +100,20 @@ public actor WhisperEngine {
         params.flash_attn = false
         #endif
 
-        guard let newCtx = modelURL.path.withCString({ cPath in
+        WhisperLogCapture.shared.startCapture()
+        let newCtxOptional = modelURL.path.withCString { cPath in
             whisper_init_from_file_with_params(cPath, params)
-        }) else {
+        }
+        let captured = WhisperLogCapture.shared.stopCapture()
+
+        guard let newCtx = newCtxOptional else {
             throw Error.modelLoadFailed(modelURL.path)
         }
         self.ctx = newCtx
         self.loadedPath = modelURL.path
         self.modelName = displayName
+        self.coreMLStatus = Self.parseCoreMLStatus(from: captured)
+        whisperLog.notice("Loaded \(displayName, privacy: .public) coreML=\(self.coreMLStatus.description, privacy: .public)")
 
         #if canImport(Metal)
         // Force ggml-metal to finish its async resource-set init right now.
@@ -276,6 +340,55 @@ public actor WhisperEngine {
         // 750 — the "discrete safe subdivision of 1500" point that
         // whisper's encoder accepts (see fixture sweep above).
         return 750
+    }
+
+    /// Classify whisper.cpp's init-time log lines into a `CoreMLStatus`.
+    ///
+    /// whisper.cpp's published log strings during CoreML init are:
+    ///   * `<func>: loading Core ML model from '<path>'` — attempts load
+    ///   * `<func>: Core ML model loaded` — load succeeded
+    ///   * `<func>: failed to load Core ML model from '<path>'` — load failed
+    ///
+    /// When no sibling `.mlmodelc` exists, whisper.cpp emits the "loading"
+    /// line and then the "failed" line. To distinguish "intended but failed"
+    /// from "never present", we only report `.failed` when the "loading"
+    /// line referenced a path that actually exists on disk — otherwise we
+    /// treat it as the benign "no .mlmodelc sibling" case (`.unavailable`).
+    static func parseCoreMLStatus(from lines: [String]) -> CoreMLStatus {
+        let joined = lines.joined(separator: "")
+        let loaded = joined.contains("Core ML model loaded")
+        let failed = joined.contains("failed to load Core ML model")
+
+        if loaded {
+            for line in lines {
+                if let r = line.range(of: "loading Core ML model from '") {
+                    let tail = line[r.upperBound...]
+                    if let endQuote = tail.firstIndex(of: "'") {
+                        return .loaded(path: String(tail[..<endQuote]))
+                    }
+                }
+            }
+            return .loaded(path: "")
+        }
+        if failed {
+            for line in lines {
+                if let r = line.range(of: "failed to load Core ML model from '") {
+                    let tail = line[r.upperBound...]
+                    if let endQuote = tail.firstIndex(of: "'") {
+                        let path = String(tail[..<endQuote])
+                        // If the .mlmodelc doesn't exist, the "failed" line is
+                        // just whisper.cpp reporting "no sibling found" — the
+                        // user simply hasn't installed CoreML weights, which
+                        // isn't a failure.
+                        if FileManager.default.fileExists(atPath: path) {
+                            return .failed(reason: "init failed at \(path)")
+                        }
+                    }
+                }
+            }
+            return .unavailable
+        }
+        return .unavailable
     }
 
     /// Apply auto-gain so quiet recordings still hit Whisper's speech threshold.
