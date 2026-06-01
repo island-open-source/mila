@@ -172,7 +172,36 @@ final class UtteranceDetector {
     }
 
     /// Wipes detector state. Call when starting a new recording.
+    ///
+    /// `reset()` and `flush()` wipe the **same** set of fields — the
+    /// only difference is that `flush()` first emits any in-flight
+    /// utterance, while `reset()` discards it. Keep these two in sync:
+    /// any caller reusing a detector across recordings should see a
+    /// fresh envelope / noise floor / pre-roll / pending-speech buffer
+    /// regardless of which entry point they use.
     func reset() {
+        clearAllState()
+    }
+
+    /// Force-emit any in-progress utterance regardless of trailing
+    /// silence (so end-of-recording tail isn't lost), then wipe state.
+    /// Symmetric with `reset()` — see the note there. The only
+    /// difference is "wipe AND emit in-flight" vs "wipe AND discard
+    /// in-flight".
+    func flush() {
+        if state == .speech, speechFramesInCurrent >= minUtteranceFrames {
+            emit()
+        }
+        clearAllState()
+    }
+
+    /// Shared state-wipe used by both `reset()` and `flush()`. Wipes
+    /// the state machine, in-progress utterance, pre-roll ring buffer,
+    /// pending-speech onset buffer, partial-frame accumulator, sample
+    /// counter, envelope tracker, noise floor, and tick statistics.
+    /// Keep this exhaustive so a wiped detector is indistinguishable
+    /// from a freshly-constructed one (modulo init parameters).
+    private func clearAllState() {
         state = .silence
         preRoll = Array(repeating: [Float](), count: preRollFrames)
         preRollHead = 0
@@ -186,19 +215,9 @@ final class UtteranceDetector {
         signalEnvelope = 0
         pendingSpeechFrames = 0
         pendingSpeechBuffer.removeAll(keepingCapacity: true)
-    }
-
-    /// Force-emit any in-progress utterance regardless of trailing
-    /// silence. Used at end-of-recording so the tail doesn't sit in
-    /// the detector unpublished.
-    func flush() {
-        if state == .speech, speechFramesInCurrent >= minUtteranceFrames {
-            emit()
-        }
-        state = .silence
-        current.removeAll(keepingCapacity: true)
-        silentTailFrames = 0
-        speechFramesInCurrent = 0
+        peakRmsSinceTick = 0
+        sumRmsSinceTick = 0
+        framesSinceTick = 0
     }
 
     func ingest(_ samples: ArraySlice<Float>) {
