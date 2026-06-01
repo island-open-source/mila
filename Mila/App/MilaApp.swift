@@ -926,6 +926,12 @@ struct MilaApp: App {
                 modelManager.download(model)
             }
         }
+        // Pick up any sibling `-encoder.mlmodelc` that's missing for an
+        // already-installed `.bin`. New users get the CoreML zip via the
+        // post-`.bin`-install hook in ModelManager; this catches the
+        // upgrade case (existing 1.7 users who already have the .bin on
+        // disk from a previous run).
+        modelManager.ensureCoreMLInstalled()
     }
 }
 
