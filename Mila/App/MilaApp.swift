@@ -680,31 +680,32 @@ struct MilaApp: App {
         var feedTask: Task<Void, Never>?
         var aiEnabledCancellable: AnyCancellable?
 
-        // Hardware gate: on Macs below the Live AI bar (currently:
-        // MacBook Air), skip the entire live pipeline. The recording
-        // itself still runs — `RecordingSession` writes the WAV
-        // regardless — and `QuickActionsController` enqueues a
-        // post-record transcription on stop, so the user gets a
-        // normal recording + background transcribe. We just don't
-        // spin up the live transcriber, diarizer, or AI session,
-        // which would burn CPU on a machine that can't keep up with
-        // them in real time. The early return is safe because the
-        // hardware decision is fixed for the lifetime of the
-        // process — sysctl values don't change at runtime.
+        // Hardware gate: re-checked PER-RECORDING (not at function
+        // level) so the user can toggle `forceLiveAIOnLowEndHardware`
+        // mid-session and have the next recording pick up the change.
+        // The old function-level early-return meant flipping the
+        // override required an app relaunch (flagged by Cursor on
+        // baeeb8c: "wireLiveAIPipeline runs once at launch and returns
+        // immediately when isLiveAIAvailable is false. Toggling
+        // forceLiveAIOnLowEndHardware updates isLiveAIAvailable but
+        // never starts the session observer").
         //
-        // UI-test exception: handled centrally in `MilaApp.init()` by
-        // injecting a non-Air `SystemCapabilities` into `LiveAISettings`
-        // when the relevant launch arg is present, so
-        // `isLiveAIAvailable` is already true here.
-        guard aiSettings.isLiveAIAvailable else {
-            os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
-                .log("wireLiveAIPipeline: skipped — hardware below Live AI bar (model=\(aiSettings.capabilities.marketingName, privacy: .public))")
-            return
-        }
+        // The state observer below runs forever now; the `.recording`
+        // branch is where we gate on `aiSettings.isLiveAIAvailable`.
 
         for await state in sessionRef.$state.values {
             switch state {
             case .recording:
+                guard aiSettings.isLiveAIAvailable else {
+                    // Hardware below the Live AI bar AND no override
+                    // override flipped. Recording still runs via
+                    // RecordingSession; QuickActionsController enqueues
+                    // a post-record transcribe on stop. We just skip
+                    // the live pipeline setup.
+                    os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+                        .log("wireLiveAIPipeline: .recording skipped — hardware below Live AI bar (model=\(aiSettings.capabilities.marketingName, privacy: .public))")
+                    continue
+                }
                 // Live transcription runs on every recording — it's how
                 // the recording UI shows the live transcript pane even
                 // when AI mode is off. Apply the user's tick-interval

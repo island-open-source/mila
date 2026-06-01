@@ -314,6 +314,16 @@ final class QuickActionsController: ObservableObject {
         // down — keeping it past `stop()` would block idle sleep while
         // the user is just looking at the rename sheet.
         sleepGuard.allowIdleSleep()
+        // Set `isFinalizingRecording = true` BEFORE `session.stop()` so
+        // wireLiveAIPipeline's `.idle` handler (which fires during
+        // session.stop()'s state transition) sees the flag and skips
+        // its own drain + `transcriber.stop()`. Cursor flagged this in
+        // PR review of 0c7ce08: setting the flag AFTER `await
+        // session.stop()` left a window where `.idle` could call
+        // `transcriber.stop()` mid-flight, wiping `liveTranscriber.
+        // segments` before this function's inline drain reads them.
+        isFinalizingRecording = true
+        defer { isFinalizingRecording = false }
         guard let outputURL = await session.stop() else {
             activeJob = .none
             return
@@ -424,11 +434,9 @@ final class QuickActionsController: ObservableObject {
         // sheet renders within ~16ms even though we don't return
         // from `stopRecording` for another few seconds.
         //
-        // `isFinalizingRecording` tells the `.idle` handler to skip
-        // its own drain + cleanup — we own the lifecycle in this
-        // codepath.
-        isFinalizingRecording = true
-        defer { isFinalizingRecording = false }
+        // `isFinalizingRecording` was set above (before `session.stop()`)
+        // so the `.idle` handler skips its own drain + cleanup. We own
+        // the lifecycle in this codepath.
         await liveTranscriber?.transcribeNow()
         await liveDiarizer?.awaitPending()
         if let diar = liveDiarizer {
@@ -456,14 +464,30 @@ final class QuickActionsController: ObservableObject {
         let finalSummary = (liveAISession?.summary ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let finalItems = liveAISession?.actionItems ?? []
-        // Bugbot: chunk mode (useVAD=false) also accumulates real segments
-        // in the live pane while recording. The old `&& vadActive` gate
-        // wiped `fullText` to "" on save for chunk-mode recordings —
-        // the rename sheet would briefly show text and then go blank
-        // until batch transcription caught up. Treat any non-empty live
-        // segment list as authoritative; both modes produce keepable
-        // output.
-        let useLiveTranscript = !finalLiveSegments.isEmpty
+        // Whether the live pipeline ran in VAD mode (utterance-bounded
+        // + speaker-diarized). Chunk mode produces segments too but
+        // they lack speakers, so the batch pass still needs to run.
+        let vadActive = (liveAISettings?.useVAD == true) && (liveAISettings?.enabled == true)
+        // Two questions, two gates:
+        //
+        //   1. `hasLiveSegments`: do we have something to SHOW the user
+        //      in the rename sheet right now? Both VAD and chunk-mode
+        //      produce segments worth displaying immediately — wiping
+        //      them on save (the old `&& vadActive` gate) made the
+        //      sheet briefly show text and then go blank.
+        //
+        //   2. `liveTranscriptIsAuthoritative`: are the saved segments
+        //      the FINAL truth, or do we still need a batch pass to
+        //      add speaker labels? Only the VAD path runs the
+        //      diarizer (via `transcriber.onUtteranceCaptured`) —
+        //      chunk mode segments lack speaker info, so we keep
+        //      them visible but enqueue for batch diarization, which
+        //      overwrites them when done.
+        //
+        // `vadActive` here is whatever was passed in by the caller —
+        // typically `liveAISettings.useVAD && liveAISettings.enabled`.
+        let hasLiveSegments = !finalLiveSegments.isEmpty
+        let liveTranscriptIsAuthoritative = hasLiveSegments && vadActive
         let finalTranscriptSegments: [TranscriptSegment] = finalLiveSegments.map { ls in
             TranscriptSegment(start: ls.startSeconds, end: ls.endSeconds,
                               text: ls.text, speaker: ls.speaker)
@@ -480,24 +504,29 @@ final class QuickActionsController: ObservableObject {
             return
         }
         updated.segments = finalTranscriptSegments
-        updated.fullText = useLiveTranscript ? finalFullText : ""
+        // Always preserve fullText when we have live segments — the
+        // sheet should show what the user just saw on screen, even
+        // for chunk mode while the batch diarization pass is still
+        // pending. Batch will overwrite segments + fullText when done.
+        updated.fullText = hasLiveSegments ? finalFullText : ""
         updated.summary = finalSummary.isEmpty ? nil : finalSummary
         updated.actionItems = finalItems.isEmpty ? nil : finalItems
-        updated.status = useLiveTranscript ? .completed : .pending
+        updated.status = liveTranscriptIsAuthoritative ? .completed : .pending
         store.update(updated)
 
-        if useLiveTranscript {
-            // Mirror the enqueue path's post-success side effect:
-            // write `.srt` sidecar so video / subtitle workflows
-            // find it next to the WAV.
+        if liveTranscriptIsAuthoritative {
+            // VAD path: live segments already have speakers from the
+            // diarizer pipeline; no batch run needed. Write the SRT
+            // sidecar + trigger the summarizer ourselves (the enqueue
+            // path normally runs both via its onTranscriptionCompleted
+            // hook).
             TranscriptExporter.writeSRT(for: updated, in: store.recordingsDirectory)
-            // The enqueue path runs the summary trigger via
-            // TranscriptionService's onTranscriptionCompleted hook,
-            // but this branch bypassed enqueue. Fire it here — the
-            // summarizer's gate skips redundant work when a live
-            // summary already exists.
             summarizer?.summarizeIfNeeded(updated)
         } else {
+            // Chunk mode or no live segments: enqueue for batch
+            // transcription. For chunk mode the batch pass overwrites
+            // segments + fullText with diarized output; for the
+            // empty-segments case it's the first transcription pass.
             transcription.enqueue(updated)
         }
 
