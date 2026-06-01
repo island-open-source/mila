@@ -122,22 +122,31 @@ public actor WhisperEngine {
         params.flash_attn = false
         #endif
 
-        // Heuristic for "this is the first CoreML compile" — emit a
-        // preparation notification iff a sibling `-encoder.mlmodelc`
-        // exists AND we haven't persisted a "compiled" marker for this
-        // model yet. The very first load on a fresh install takes
-        // ~13s while CoreML compiles the mlmodelc for the local
-        // hardware; subsequent loads are <1s (cached). Without this
-        // pre-flight check we'd either skip the banner on the slow
-        // case or show it on every launch.
+        // Emit a preparation notification whenever a sibling
+        // `-encoder.mlmodelc` exists. CoreML's compile cache is
+        // managed by the OS — we can't reliably know whether THIS
+        // particular load will be cold (~13s compile) or warm
+        // (<1s). A previous version of this code persisted a
+        // `coreml.compiled.<model>` UserDefaults flag after the first
+        // successful load and used it to gate the banner. Cursor
+        // (PRRT_kwDOSY2m-s6GOIkG) flagged the failure mode: if the
+        // OS's compile cache is wiped (system update, user clears
+        // caches) but our UserDefaults flag stays set, the next slow
+        // recompile would skip the banner and the Record button
+        // would stay enabled while the encoder is recompiling.
+        //
+        // The simplest correct behavior: always notify (true) before
+        // the load and (false) after, whenever the sibling exists.
+        // On a warm load the banner appears + disappears in <1s
+        // (brief flicker on app launch); on a cold compile it stays
+        // up for the full ~13s and the Record button is correctly
+        // disabled. A brief flicker is better than a silently
+        // unresponsive Record button.
         let mlmodelcPath = modelURL.deletingPathExtension().path + "-encoder.mlmodelc"
         let hasSiblingMLModel = FileManager.default.fileExists(atPath: mlmodelcPath)
-        let compiledKey = "coreml.compiled.\(modelURL.lastPathComponent)"
-        let alreadyCompiled = UserDefaults.standard.bool(forKey: compiledKey)
-        let expectCompile = hasSiblingMLModel && !alreadyCompiled
-        if expectCompile {
-            preparationObserver?(true, "Preparing Neural Engine (one-time setup)…")
-            whisperLog.notice("Expecting first-time CoreML compile for \(displayName, privacy: .public)")
+        if hasSiblingMLModel {
+            preparationObserver?(true, "Preparing Neural Engine…")
+            whisperLog.notice("CoreML load starting for \(displayName, privacy: .public) (sibling .mlmodelc found)")
         }
 
         let started = Date()
@@ -150,7 +159,7 @@ public actor WhisperEngine {
 
         // Always notify "done" if we previously notified "starting", so
         // the UI never sticks in the preparing state on a failed load.
-        if expectCompile {
+        if hasSiblingMLModel {
             preparationObserver?(false, nil)
         }
 
@@ -163,15 +172,8 @@ public actor WhisperEngine {
         self.coreMLStatus = Self.parseCoreMLStatus(from: captured)
         whisperLog.notice("Loaded \(displayName, privacy: .public) coreML=\(self.coreMLStatus.description, privacy: .public) elapsed=\(elapsed, privacy: .public)s")
 
-        // Persist the "compiled" marker after a successful load when
-        // CoreML actually engaged. The next launch will see the flag
-        // and skip the preparation banner because the mlmodelc cache
-        // is already populated for this device.
-        if case .loaded = self.coreMLStatus {
-            if elapsed > Self.coreMLCompileThresholdSeconds {
-                whisperLog.notice("CoreML compile detected for \(displayName, privacy: .public) (elapsed=\(elapsed, privacy: .public)s > \(Self.coreMLCompileThresholdSeconds, privacy: .public)s)")
-            }
-            UserDefaults.standard.set(true, forKey: compiledKey)
+        if case .loaded = self.coreMLStatus, elapsed > Self.coreMLCompileThresholdSeconds {
+            whisperLog.notice("CoreML cold compile detected for \(displayName, privacy: .public) (elapsed=\(elapsed, privacy: .public)s > \(Self.coreMLCompileThresholdSeconds, privacy: .public)s)")
         }
 
         #if canImport(Metal)

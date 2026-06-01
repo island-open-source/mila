@@ -325,6 +325,13 @@ final class QuickActionsController: ObservableObject {
         isFinalizingRecording = true
         defer { isFinalizingRecording = false }
         guard let outputURL = await session.stop() else {
+            // Failed stop: still tear down the live pipelines since
+            // wireLiveAIPipeline's `.idle` handler skipped its
+            // teardown because of the flag. Without this, the
+            // transcriber/diarizer keep stale state until the next
+            // recording. Cursor (PRRT_kwDOSY2m-s6GOIj-) flagged it.
+            liveTranscriber?.stop()
+            liveDiarizer?.stop()
             activeJob = .none
             return
         }
@@ -467,7 +474,21 @@ final class QuickActionsController: ObservableObject {
         // Whether the live pipeline ran in VAD mode (utterance-bounded
         // + speaker-diarized). Chunk mode produces segments too but
         // they lack speakers, so the batch pass still needs to run.
-        let vadActive = (liveAISettings?.useVAD == true) && (liveAISettings?.enabled == true)
+        // VAD runs independently of Live AI being on (the diarizer
+        // sits at the recording-session level, not the LiveAISession
+        // level), so the gate is `useVAD` only — not && enabled.
+        // Cursor (PRRT_kwDOSY2m-s6GOIj4) caught this: gating on
+        // `enabled` made VAD-with-LiveAI-off recordings unnecessarily
+        // re-batch-transcribed.
+        let vadActive = (liveAISettings?.useVAD == true)
+        // Meeting mode: live whisper only sees the mic (see
+        // RecordingSession.consumeMic comment for why). The saved WAV
+        // still contains the mic+system mix, so the live transcript
+        // is INCOMPLETE — remote/system-side speech would never make
+        // it into the saved transcript if we treated mic-only as
+        // final. Force batch transcription in meeting mode.
+        // Cursor (PRRT_kwDOSY2m-s6GOIjm) caught this.
+        let isMeetingMode = (source == .meeting)
         // Two questions, two gates:
         //
         //   1. `hasLiveSegments`: do we have something to SHOW the user
@@ -487,7 +508,7 @@ final class QuickActionsController: ObservableObject {
         // `vadActive` here is whatever was passed in by the caller —
         // typically `liveAISettings.useVAD && liveAISettings.enabled`.
         let hasLiveSegments = !finalLiveSegments.isEmpty
-        let liveTranscriptIsAuthoritative = hasLiveSegments && vadActive
+        let liveTranscriptIsAuthoritative = hasLiveSegments && vadActive && !isMeetingMode
         let finalTranscriptSegments: [TranscriptSegment] = finalLiveSegments.map { ls in
             TranscriptSegment(start: ls.startSeconds, end: ls.endSeconds,
                               text: ls.text, speaker: ls.speaker)
