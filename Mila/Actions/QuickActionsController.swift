@@ -313,95 +313,46 @@ final class QuickActionsController: ObservableObject {
             }
         }()
 
-        // Capture any Live-AI output that accumulated during this
-        // recording so it ships with the saved Recording. We key off
-        // "did the LLM session actually produce anything?" rather
-        // than the current toggle state — a user who flips Live AI
-        // off RIGHT before pressing Stop shouldn't lose the summary
-        // and action items that already accumulated during the run.
-        //
-        // Drain any in-flight or pending LLM tick FIRST: the
-        // wireLiveAIPipeline's `.idle` handler runs concurrently with
-        // this method and fires one last `feed()` to flush the
-        // recording's tail. If we read `.summary` before that tick
-        // completes, the saved Recording misses the final update.
-        //
-        // Same race exists for the live transcript: the `.idle`
-        // handler calls `transcriber.transcribeNow()` to emit any
-        // utterance still sitting in the VAD buffer, but it runs in
-        // a separate task. Without an explicit flush here, reading
-        // `liveTranscriber?.segments` below would race the final
-        // utterance and `useLiveTranscript=true` would skip enqueue,
-        // permanently dropping the tail. Calling `transcribeNow()`
-        // is idempotent (detector.flush + await lastUtteranceTask),
-        // so racing the `.idle` handler is fine — whichever runs
-        // second is a no-op.
-        await liveTranscriber?.transcribeNow()
-        // Drain the diarizer's chained background work so the final
-        // utterance's embedding lands in `intervals` before we save.
-        // Then re-apply labels — `feedTask` (the loop that normally
-        // calls applySpeakerLabels on each $segments tick) is
-        // cancelled by the `.idle` handler, so without this the
-        // final utterance would have its segment but no speaker.
-        // Pre-PR the post-record batch diarizer caught this gap; with
-        // useLiveTranscript=true skipping enqueue, that safety net is
-        // gone.
-        await liveDiarizer?.awaitPending()
-        if let diar = liveDiarizer {
-            liveTranscriber?.applySpeakerLabels(diar.intervals)
-        }
-        await liveAISession?.awaitFinalTick()
-        let liveSummary = (liveAISession?.summary ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let liveItems = liveAISession?.actionItems ?? []
-
-        // If the VAD path was active and produced segments, ship them
-        // as the saved transcript directly instead of waiting for
-        // whisper to re-process the WAV. The live diarizer has
-        // already attached speaker labels to each segment via
-        // `LiveTranscriber.applySpeakerLabels`, so we get diarization
-        // for free too. This collapses the post-stop "transcribing…"
-        // sheet from ~30-120s down to instant.
-        //
-        // Scope this skip to VAD specifically: the chunk-based path
-        // (useVAD=false) also produces segments via `runOnce`, but
-        // it never fires `onUtteranceCaptured` so the live diarizer
-        // is never fed — those segments have no speaker labels and
-        // need the post-record batch diarizer to attach them. Falling
-        // back to `enqueue` in that mode preserves the existing
-        // speaker-label experience for users who opted out of VAD.
-        let liveSegments = liveTranscriber?.segments ?? []
+        // ---- IMMEDIATE: build a tentative Recording from whatever
+        // live state is available RIGHT NOW (no awaits), add it to
+        // the store, and present the rename sheet. Previously we
+        // awaited transcribeNow + diarizer drain + LLM final tick
+        // BEFORE presenting — that pushed the dialog appearance
+        // anywhere from a few seconds to 30+ seconds after the user
+        // tapped Stop, while their data was already visible in the
+        // live pane. Now the dialog pops up instantly; the
+        // background drain below updates the Recording (and thus
+        // the sheet, which observes the store) as more data lands.
         let vadActive = liveTranscriber?.useVAD == true
-        let useLiveTranscript = !liveSegments.isEmpty && vadActive
-        let transcriptSegments: [TranscriptSegment] = liveSegments.map { ls in
-            TranscriptSegment(
-                start: ls.startSeconds,
-                end: ls.endSeconds,
-                text: ls.text,
-                speaker: ls.speaker
-            )
+        let initialSegments = liveTranscriber?.segments ?? []
+        let initialTranscriptSegments: [TranscriptSegment] = initialSegments.map { ls in
+            TranscriptSegment(start: ls.startSeconds, end: ls.endSeconds,
+                              text: ls.text, speaker: ls.speaker)
         }
-        let liveFullText = transcriptSegments.map(\.text).joined(separator: " ")
-
+        let initialSummary = (liveAISession?.summary ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let initialItems = liveAISession?.actionItems ?? []
+        // Use `.running` so the sheet shows the "transcribing in
+        // progress" status icon while the background drain finishes
+        // up. The flip to `.completed` (or `.pending` → `.enqueue`
+        // path for non-VAD) happens at the end of the drain task.
+        let initialStatus: TranscriptionStatus = vadActive ? .running : .pending
         let recording = Recording(
             title: title,
             duration: duration,
             source: source,
             audioFileName: outputURL.lastPathComponent,
-            status: useLiveTranscript ? .completed : .pending,
+            status: initialStatus,
             language: languageSettings.current.rawValue,
-            segments: transcriptSegments,
-            fullText: useLiveTranscript ? liveFullText : "",
+            segments: initialTranscriptSegments,
+            fullText: initialTranscriptSegments.map(\.text).joined(separator: " "),
             appName: appName,
-            summary: liveSummary.isEmpty ? nil : liveSummary,
-            actionItems: liveItems.isEmpty ? nil : liveItems
+            summary: initialSummary.isEmpty ? nil : initialSummary,
+            actionItems: initialItems.isEmpty ? nil : initialItems
         )
         store.add(recording)
         activeJob = .none
         if sleepReason != nil {
-            // A wake-time alert (raised by `notifySleepInterrupted`) needs
-            // the recording's finalized metadata. Stash it now; the
-            // notification handler picks it up after `didWake` fires.
             sleepInterruption = SleepInterruption(
                 recordingID: recording.id,
                 title: recording.title,
@@ -409,40 +360,64 @@ final class QuickActionsController: ObservableObject {
                 wasOnBattery: !SleepGuard.isOnACPower()
             )
         }
-        // Open the rename sheet immediately, in parallel with transcription.
-        // The sheet watches the store for the transcript to land and
-        // enables LLM-suggest / Send-to-Claude once it's ready. Dictations
-        // and imported files deliberately skip this — naming a 3-second
-        // dictation would be more friction than the auto-title is worth.
-        // Only suppress when the stop was forced by sleep: stacking a
-        // modal behind the wake-up alert would force the user to dismiss
-        // two prompts in a row. We used to also skip when Live AI was
-        // active (reasoning: the split-pane already gave the user a
-        // summary), but the rename sheet is also where Send-to-Claude
-        // lives for follow-up actions — so it should always appear,
-        // Live AI or not.
         if sleepReason == nil {
             postRecording.present(recording)
         }
-        // Only kick the queue if we don't have a live transcript
-        // ready to go. With useLiveTranscript=true the Recording was
-        // saved with status=.completed and a transcript already
-        // attached — the rename sheet shows the text immediately
-        // and there's no "Transcribing…" progress bar.
-        if useLiveTranscript {
-            // Mirror the enqueue path's post-success side effect:
-            // write a `.srt` sidecar alongside the WAV so video
-            // export / subtitle workflows still find it.
-            TranscriptExporter.writeSRT(for: recording, in: store.recordingsDirectory)
-            // The enqueue path runs the summary trigger via
-            // TranscriptionService's onTranscriptionCompleted hook,
-            // but this branch saved the recording directly so the
-            // hook never fires. Fire it here instead — the
-            // summarizer's own gate skips work when a live summary
-            // already landed during the recording.
-            summarizer?.summarizeIfNeeded(recording)
-        } else {
-            transcription.enqueue(recording)
+
+        // ---- BACKGROUND DRAIN: finalize what was still in-flight,
+        // then update the Recording in the store so the sheet
+        // re-renders with final data.
+        let recordingID = recording.id
+        let outputURLLocal = outputURL
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.liveTranscriber?.transcribeNow()
+            await self.liveDiarizer?.awaitPending()
+            if let diar = self.liveDiarizer {
+                self.liveTranscriber?.applySpeakerLabels(diar.intervals)
+            }
+            await self.liveAISession?.awaitFinalTick()
+
+            // Snapshot final state.
+            let finalLiveSegments = self.liveTranscriber?.segments ?? []
+            let finalSummary = (self.liveAISession?.summary ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let finalItems = self.liveAISession?.actionItems ?? []
+            let useLiveTranscript = !finalLiveSegments.isEmpty && vadActive
+            let finalTranscriptSegments: [TranscriptSegment] = finalLiveSegments.map { ls in
+                TranscriptSegment(start: ls.startSeconds, end: ls.endSeconds,
+                                  text: ls.text, speaker: ls.speaker)
+            }
+            let finalFullText = finalTranscriptSegments.map(\.text).joined(separator: " ")
+
+            // Update the stored Recording. The rename sheet's
+            // `liveRecording` binding picks the new data up the next
+            // time the store publishes.
+            guard var updated = self.store.recordings.first(where: { $0.id == recordingID }) else {
+                _ = outputURLLocal  // keep capture; nothing else to do
+                return
+            }
+            updated.segments = finalTranscriptSegments
+            updated.fullText = useLiveTranscript ? finalFullText : ""
+            updated.summary = finalSummary.isEmpty ? nil : finalSummary
+            updated.actionItems = finalItems.isEmpty ? nil : finalItems
+            updated.status = useLiveTranscript ? .completed : .pending
+            self.store.update(updated)
+
+            if useLiveTranscript {
+                // Mirror the enqueue path's post-success side effect:
+                // write `.srt` sidecar so video / subtitle workflows
+                // find it next to the WAV.
+                TranscriptExporter.writeSRT(for: updated, in: self.store.recordingsDirectory)
+                // The enqueue path runs the summary trigger via
+                // TranscriptionService's onTranscriptionCompleted
+                // hook, but this branch bypassed enqueue. Fire it
+                // here — the summarizer's gate skips redundant work
+                // when a live summary already exists.
+                self.summarizer?.summarizeIfNeeded(updated)
+            } else {
+                self.transcription.enqueue(updated)
+            }
         }
     }
 

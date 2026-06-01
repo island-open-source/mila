@@ -45,6 +45,16 @@ final class LiveAISettings: ObservableObject {
         didSet { defaults.set(useVAD, forKey: Keys.useVAD) }
     }
 
+    /// When true, the recording UI stays on the Home screen (just a
+    /// Stop button) instead of switching to the LiveAIRecordingView's
+    /// split pane. Transcription + summary continue to run in the
+    /// background and are saved when the recording stops. Useful for
+    /// lower-power Macs (MacBook Air etc.) where the live pane's
+    /// continuous rendering competes with whisper for CPU.
+    @Published var backgroundMode: Bool {
+        didSet { defaults.set(backgroundMode, forKey: Keys.backgroundMode) }
+    }
+
     /// Speaker-similarity cosine threshold. ≥ this is the same speaker;
     /// below is a new speaker. 0.75 is a reasonable starting point for
     /// pyannote/embedding output.
@@ -165,6 +175,7 @@ final class LiveAISettings: ObservableObject {
         // Default ON: users who never touched the toggle get the
         // cleaner-boundary VAD path. Explicit false is preserved.
         self.useVAD = defaults.object(forKey: Keys.useVAD) as? Bool ?? true
+        self.backgroundMode = defaults.bool(forKey: Keys.backgroundMode)
         let sim = defaults.double(forKey: Keys.simThreshold)
         // Migrate the old 0.75 default — too strict for wespeaker on
         // 1-5s VAD utterances; same-speaker cosine sim at that length
@@ -252,6 +263,7 @@ the content.
         static let model = "liveAI.model"
         static let chunkSeconds = "liveAI.chunkSeconds"
         static let useVAD = "liveAI.useVAD"
+        static let backgroundMode = "liveAI.backgroundMode"
         static let simThreshold = "liveAI.speakerSimilarityThreshold"
         static let prompt = "liveAI.prompt"
         static let outputLanguage = "liveAI.outputLanguage"

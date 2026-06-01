@@ -89,6 +89,13 @@ final class LiveTranscriber: ObservableObject {
     private var inFlight: Task<Void, Never>?
     private var tickTask: Task<Void, Never>?
     private var language: String = "he"
+    /// Incremented on every `start()`. A `transcribeUtterance` call
+    /// captures this at entry and re-checks before mutating state —
+    /// drops the result if the user started a new recording mid-flight.
+    /// Without this, a late-arriving whisper result from recording N
+    /// appends to recording N+1's segments (user reported seeing the
+    /// previous conversation's text in a fresh recording).
+    private var epoch: Int = 0
 
     init(transcription: TranscriptionService) {
         self.transcription = transcription
@@ -110,7 +117,8 @@ final class LiveTranscriber: ObservableObject {
         self.fullText = ""
         self.segments = []
         self.lastError = nil
-        liveLog.log("LiveTranscriber.start lang=\(language, privacy: .public) chunk=\(self.chunkSeconds, privacy: .public)s window=\(self.windowSeconds, privacy: .public)s useVAD=\(self.useVAD, privacy: .public)")
+        self.epoch &+= 1
+        liveLog.log("LiveTranscriber.start lang=\(language, privacy: .public) chunk=\(self.chunkSeconds, privacy: .public)s window=\(self.windowSeconds, privacy: .public)s useVAD=\(self.useVAD, privacy: .public) epoch=\(self.epoch, privacy: .public)")
 
         if useVAD {
             let det = UtteranceDetector()
@@ -237,6 +245,10 @@ final class LiveTranscriber: ObservableObject {
     }
 
     private func transcribeUtterance(samples: [Float], startSec: Double) async {
+        // Capture the epoch at entry. If `start()` runs between now and
+        // when whisper returns, this transcribe is for the PREVIOUS
+        // recording and its segments must NOT land in the current one.
+        let myEpoch = epoch
         isTranscribing = true
         defer { isTranscribing = false }
         // Hand the same utterance to the speaker diarizer in parallel
@@ -263,8 +275,16 @@ final class LiveTranscriber: ObservableObject {
         let startedAt = Date()
         let whisperSegs = await transcription.transcribeOnceSegments(samples: padded, language: language)
         let elapsed = Date().timeIntervalSince(startedAt)
-        liveLog.log("LiveTranscriber utterance: samples=\(samples.count) padded=\(padded.count) elapsed=\(elapsed, privacy: .public)s segments=\(whisperSegs.count) startSec=\(startSec, privacy: .public)")
+        liveLog.log("LiveTranscriber utterance: samples=\(samples.count) padded=\(padded.count) elapsed=\(elapsed, privacy: .public)s segments=\(whisperSegs.count) startSec=\(startSec, privacy: .public) epoch=\(myEpoch, privacy: .public) currentEpoch=\(self.epoch, privacy: .public)")
         guard !whisperSegs.isEmpty else { return }
+
+        // Stale-result drop. If `start()` ran while whisper was busy,
+        // the user moved to a new recording — appending this segment
+        // would show the previous conversation inside the fresh one.
+        guard self.epoch == myEpoch else {
+            liveLog.log("LiveTranscriber utterance dropped — epoch changed (was \(myEpoch, privacy: .public) now \(self.epoch, privacy: .public))")
+            return
+        }
 
         // VAD utterances are non-overlapping by construction, so we
         // just append — no merge dedup needed. Drop segments that

@@ -218,6 +218,14 @@ struct ContentView: View {
         let uiTestForcesLiveView =
             CommandLine.arguments.contains("--ui-test-rtl-live-hebrew")
         if uiTestForcesLiveView { return true }
+        // Background mode keeps the user on HomeView during recording.
+        // Transcription, diarizer, and Live AI session still run —
+        // they're not tied to the LiveAIRecordingView's lifecycle —
+        // so the saved Recording ends up identical. For lower-power
+        // Macs (MacBook Air) where the live pane competes with
+        // whisper for CPU, this trades off live visibility for
+        // throughput.
+        if liveAISettings.backgroundMode { return false }
         return actions.isRecording && liveAISettings.isLiveAIAvailable
     }
 

@@ -1049,6 +1049,15 @@ private struct LiveAISettingsTab: View {
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Background mode (hide live pane)", isOn: $settings.backgroundMode)
+                        .font(.callout.weight(.semibold))
+                    Text("Stay on the Home screen during recording. Transcription, speaker labels, and Live AI summary still run in the background and are saved when you stop. Useful on lower-power Macs where rendering the live pane competes with whisper for CPU.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text("Update every").font(.callout.weight(.semibold))
                         Spacer()
