@@ -201,7 +201,25 @@ public actor WhisperEngine {
         // explicitly chose to keep this tradeoff for the perf win; we'll
         // iterate on the formula's safety margins or floor in a follow-up
         // rather than block the perf win on a perfect-quality fix.
-        params.audio_ctx = audioCtx ?? Self.computeAudioCtx(sampleCount: samples.count)
+        // CoreML's compiled encoder mlmodelc has a FIXED input shape of
+        // `(1, mel_dim, 3000)` — the whole 30s mel window. Setting
+        // `params.audio_ctx` to a smaller value tells the GGML encoder
+        // to truncate the input, but the CoreML encoder path can't —
+        // it ignores audio_ctx (because the mlmodelc's input shape is
+        // baked in at compile time) and reads garbage / produces no
+        // segments. Observed live (Hebrew + English) on 1 Jun 2026:
+        // whisper returns segments=0 in ~0.2s when CoreML is loaded
+        // and the live-VAD path's audioCtx=nil gets computed to 750.
+        //
+        // So: when CoreML is engaged, force the default (0 = 1500-token
+        // context = full 30s). The encoder still runs on ANE; we just
+        // don't ask it to truncate. The 4× speedup from audio_ctx=750
+        // is irrelevant here because the ANE encoder is already fast.
+        if case .loaded = self.coreMLStatus {
+            params.audio_ctx = 0
+        } else {
+            params.audio_ctx = audioCtx ?? Self.computeAudioCtx(sampleCount: samples.count)
+        }
 
         let userBox = CallbackBox(progress: progress, isCancelled: isCancelled)
         let userPtr = Unmanaged.passRetained(userBox).toOpaque()
