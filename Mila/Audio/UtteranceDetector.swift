@@ -10,23 +10,58 @@ private let vadLog = Logger(subsystem: "io.island.whisper.IslandWhisper", catego
 /// pause).
 ///
 /// State machine:
-///   `.silence` — every incoming frame's RMS is checked against
-///                `rmsThreshold`. While silent, recent frames are kept
-///                in a small ring buffer for pre-roll context.
+///   `.silence` — every incoming frame's RMS is checked against the
+///                enter-speech cutoff. While silent, recent frames are
+///                kept in a small ring buffer for pre-roll context.
 ///   `.speech`  — every frame is appended to `current`. Frames whose
-///                RMS is below threshold increment `silentTailFrames`;
-///                speech frames reset it. When `silentTailFrames`
-///                reaches `silenceFrameThreshold`, the utterance is
-///                emitted (if it had at least `minUtteranceFrames` of
-///                active speech) and we drop back to `.silence`.
+///                RMS is below the stay-speech cutoff increment
+///                `silentTailFrames`; speech frames reset it. When
+///                `silentTailFrames` reaches `silenceFrameThreshold`,
+///                the utterance is emitted (if it had at least
+///                `minUtteranceFrames` of active speech) and we drop
+///                back to `.silence`.
 ///
-/// The emitted samples include the pre-roll silence (so whisper sees a
-/// clean attack on the first phoneme) and the trailing silence (so
+/// ## Dual-cutoff: absolute + envelope-relative
+///
+/// A single absolute RMS threshold (e.g. 0.012) fails when Adaptive
+/// Gain Control is amplifying input: AGC pulls background hiss and
+/// between-phrase room tone UP to near-speech RMS (~0.02–0.04), so
+/// frames that *should* count as silence never fall below the static
+/// floor — the detector latches into `.speech` for the entire
+/// max-utterance window (the "always emits 10s slabs" bug).
+///
+/// Instead, the detector compares each frame's energy against the
+/// **max** of two cutoffs:
+///   1. `absoluteCutoff = max(rmsThreshold, noiseFloor × multiplier)`
+///      — the legacy adaptive absolute floor. Catches speech in quiet
+///      rooms where the envelope-relative cutoff is too small.
+///   2. `relativeCutoff = signalEnvelope × envelopeSilenceRatio`
+///      — a fraction of the recent speech peak. Catches silence
+///      inside AGC-amplified audio, where the absolute floor is too
+///      low to discriminate.
+///
+/// `signalEnvelope` is a peak-with-decay tracker: it follows the
+/// loudest recent frame and decays exponentially, so it stays high
+/// through brief mid-word dips but releases over ~1.5–2s when speech
+/// truly stops. That window is roughly synced with AGC's release
+/// time, so by the time the envelope releases, AGC has also released
+/// the gain back down and the absolute floor becomes the binding
+/// cutoff again on the next utterance — both mechanisms stay in sync.
+///
+/// Hysteresis: entering `.speech` uses the absolute cutoff only (the
+/// envelope is small at that point; using a relative cutoff would
+/// chase its own tail). Once in `.speech`, the combined cutoff
+/// applies and is further scaled by `stayCutoffRatio` so a brief
+/// mid-word energy dip doesn't flip us back to silence.
+///
+/// The emitted samples include the pre-roll silence (so whisper sees
+/// a clean attack on the first phoneme) and the trailing silence (so
 /// whisper hears the natural end of the last word). Whisper's own
 /// segmenter handles the in-utterance phrasing.
 ///
-/// Frame size is fixed at 30ms (480 samples at 16kHz) — matches WebRTC
-/// VAD's standard frame; small enough to detect sub-half-second pauses.
+/// Frame size is fixed at 30ms (480 samples at 16kHz) — matches
+/// WebRTC VAD's standard frame; small enough to detect sub-half-
+/// second pauses.
 @MainActor
 final class UtteranceDetector {
     /// Fires on the main actor whenever a complete utterance is detected.
@@ -44,10 +79,29 @@ final class UtteranceDetector {
     private let noiseFloorAlpha: Float
     private let noiseFloorMultiplier: Float
     private let speechOnsetFrames: Int
-    /// Hysteresis: once in .speech, the cutoff is multiplied by this
-    /// ratio (< 1) so a brief mid-word energy dip doesn't flip us back
-    /// to silence. Standard VAD design.
+    /// Hysteresis: once in .speech, the stay cutoff is multiplied by
+    /// this ratio (< 1) so a brief mid-word energy dip doesn't flip
+    /// us back to silence. Standard VAD design.
     private let stayCutoffRatio: Float
+    /// Fraction of the running signal envelope that defines the
+    /// envelope-relative cutoff. With AGC enabled, between-phrase
+    /// background sits at ~0.2–0.4× the speech peak; a ratio around
+    /// 0.40 separates between-syllable dips (typically 0.5–0.7× of
+    /// peak — must stay speech) from inter-phrase silence (≤0.3× of
+    /// peak — must trigger emit).
+    private let envelopeSilenceRatio: Float
+    /// Per-frame multiplicative decay of the signal-envelope tracker.
+    /// 0.985 at 30ms ≈ a 2-second half-life — long enough that
+    /// between-syllable dips don't drop the envelope, short enough
+    /// that inter-phrase silences let it fall so the relative cutoff
+    /// can release before the next utterance starts.
+    private let envelopeDecay: Float
+    /// Floor below which the envelope is treated as inactive: the
+    /// relative cutoff returns 0 until the envelope rises above this
+    /// floor. Prevents the relative cutoff from collapsing to ~0
+    /// after a long pause (which would let any whisper of room tone
+    /// pretend to be "speech relative to nothing").
+    private let envelopeFloor: Float
 
     private var state: State = .silence
     private var preRoll: [[Float]] = []
@@ -59,19 +113,25 @@ final class UtteranceDetector {
     private var samplesIngested: Int = 0
     private var currentStartSample: Int = 0
     /// Rolling estimate of the room's background RMS, tracked only
-    /// during `.silence`. The effective speech cutoff is
+    /// during `.silence`. The effective absolute cutoff is
     /// `max(rmsThreshold, noiseFloor * noiseFloorMultiplier)` — so a
     /// quiet office gets a low cutoff and a humming AC room gets a
     /// proportionally higher one.
     private var noiseFloor: Float = 0.001
+    /// Peak-with-decay tracker of the recent speech energy. Acts as a
+    /// "running loudness" estimate so we can derive a relative-silence
+    /// cutoff that scales with whatever the speaker (and AGC) is
+    /// doing. Updated every frame:
+    /// `signalEnvelope = max(energy, signalEnvelope * decay)`.
+    private var signalEnvelope: Float = 0
     /// Counts consecutive above-cutoff frames while still in `.silence`.
     /// We only enter `.speech` after `speechOnsetFrames` of them, so a
     /// single click/pop doesn't trigger an utterance.
     private var pendingSpeechFrames: Int = 0
     private var pendingSpeechBuffer: [[Float]] = []
     /// Peak frame RMS seen since the previous tick log. Logged + reset
-    /// every ~1s so we can see actual energy levels in real environments
-    /// when speech vs silence detection misbehaves.
+    /// every ~1s so we can see actual energy levels in real
+    /// environments when speech vs silence detection misbehaves.
     private var peakRmsSinceTick: Float = 0
     private var sumRmsSinceTick: Float = 0
     private var framesSinceTick: Int = 0
@@ -89,7 +149,10 @@ final class UtteranceDetector {
         noiseFloorAlpha: Float = 0.02,
         noiseFloorMultiplier: Float = 3.0,
         speechOnsetMs: Double = 90,
-        stayCutoffRatio: Float = 0.5
+        stayCutoffRatio: Float = 0.5,
+        envelopeSilenceRatio: Float = 0.40,
+        envelopeDecay: Float = 0.985,
+        envelopeFloor: Float = 0.005
     ) {
         self.sampleRate = sampleRate
         self.frameSize = max(1, Int((sampleRate * frameMs / 1000).rounded()))
@@ -102,6 +165,9 @@ final class UtteranceDetector {
         self.noiseFloorMultiplier = noiseFloorMultiplier
         self.speechOnsetFrames = max(1, Int((speechOnsetMs / frameMs).rounded()))
         self.stayCutoffRatio = max(0.0, min(1.0, stayCutoffRatio))
+        self.envelopeSilenceRatio = max(0.0, min(1.0, envelopeSilenceRatio))
+        self.envelopeDecay = max(0.0, min(1.0, envelopeDecay))
+        self.envelopeFloor = max(0.0, envelopeFloor)
         self.preRoll = Array(repeating: [Float](), count: preRollFrames)
     }
 
@@ -117,6 +183,7 @@ final class UtteranceDetector {
         samplesIngested = 0
         currentStartSample = 0
         noiseFloor = 0.001
+        signalEnvelope = 0
         pendingSpeechFrames = 0
         pendingSpeechBuffer.removeAll(keepingCapacity: true)
     }
@@ -146,13 +213,59 @@ final class UtteranceDetector {
         // "nothing happens" reports without spamming the log.
         if samplesIngested % Int(sampleRate) < frameSize {
             let s = state == .speech ? "speech" : "silence"
-            let cutoff = max(rmsThreshold, min(rmsThreshold * 2.5, noiseFloor * noiseFloorMultiplier))
+            let absC = absoluteCutoff()
+            let relC = relativeCutoff()
+            let enterC = enterCutoff()
+            let stayC = stayCutoff()
             let avg = framesSinceTick > 0 ? sumRmsSinceTick / Float(framesSinceTick) : 0
-            vadLog.log("VAD tick: state=\(s, privacy: .public) noiseFloor=\(self.noiseFloor, privacy: .public) cutoff=\(cutoff, privacy: .public) peakRms=\(self.peakRmsSinceTick, privacy: .public) avgRms=\(avg, privacy: .public) speechFrames=\(self.speechFramesInCurrent, privacy: .public)")
+            vadLog.log("VAD tick: state=\(s, privacy: .public) noiseFloor=\(self.noiseFloor, privacy: .public) envelope=\(self.signalEnvelope, privacy: .public) absCutoff=\(absC, privacy: .public) relCutoff=\(relC, privacy: .public) enterCutoff=\(enterC, privacy: .public) stayCutoff=\(stayC, privacy: .public) peakRms=\(self.peakRmsSinceTick, privacy: .public) avgRms=\(avg, privacy: .public) speechFrames=\(self.speechFramesInCurrent, privacy: .public)")
             peakRmsSinceTick = 0
             sumRmsSinceTick = 0
             framesSinceTick = 0
         }
+    }
+
+    /// Adaptive absolute cutoff: the static `rmsThreshold` raised by
+    /// the noise floor (capped at 2.5× the static value), so a humming
+    /// AC room doesn't constantly false-trigger. Same as the legacy
+    /// single-cutoff path.
+    private func absoluteCutoff() -> Float {
+        max(rmsThreshold, min(rmsThreshold * 2.5, noiseFloor * noiseFloorMultiplier))
+    }
+
+    /// Envelope-relative cutoff: a fraction of the recent speech
+    /// peak. Returns 0 when the envelope is below the floor — i.e.,
+    /// at start of recording or after a long quiet — so the absolute
+    /// cutoff alone governs in those windows.
+    private func relativeCutoff() -> Float {
+        guard signalEnvelope > envelopeFloor else { return 0 }
+        return signalEnvelope * envelopeSilenceRatio
+    }
+
+    /// Cutoff used to *enter* speech from silence. Absolute-only —
+    /// using the relative cutoff while no speech is in progress would
+    /// chase its own tail (envelope ≈ 0 → cutoff ≈ 0 → any tiny noise
+    /// qualifies → bumps envelope → ...).
+    private func enterCutoff() -> Float {
+        absoluteCutoff()
+    }
+
+    /// Cutoff used to *stay* in speech. Combines both mechanisms —
+    /// the higher of the two wins (a frame must overcome BOTH kinds
+    /// of "this is silent" test to count as speech).
+    ///
+    /// The absolute portion is multiplied by `stayCutoffRatio` (< 1)
+    /// for mid-word hysteresis: brief energy dips in a quiet room
+    /// shouldn't drop us back to silence.
+    ///
+    /// The relative portion is **NOT** scaled — `envelopeSilenceRatio`
+    /// already encodes the dip-vs-silence threshold directly (it sits
+    /// between "between-syllable dip ≈ 0.5-0.7× peak" and "inter-phrase
+    /// silence ≈ 0.1-0.3× peak"). Halving it again would slide the
+    /// cutoff into syllable-dip territory and prevent silence from
+    /// ever registering — the original AGC-amplified bug.
+    private func stayCutoff() -> Float {
+        max(absoluteCutoff() * stayCutoffRatio, relativeCutoff())
     }
 
     private func handle(frame: [Float]) {
@@ -160,13 +273,21 @@ final class UtteranceDetector {
         if energy > peakRmsSinceTick { peakRmsSinceTick = energy }
         sumRmsSinceTick += energy
         framesSinceTick += 1
-        // Enter-speech cutoff: capped dynamic threshold (room noise can
-        // raise it, but only up to 2.5× the static floor).
-        let enterCutoff = max(rmsThreshold, min(rmsThreshold * 2.5, noiseFloor * noiseFloorMultiplier))
-        // Hysteresis: once in speech, a lower cutoff keeps us in speech
-        // through brief mid-word energy dips (consonants, vowel decay).
-        let cutoff = (state == .silence) ? enterCutoff : enterCutoff * stayCutoffRatio
-        let isSpeech = energy >= cutoff
+
+        // Update the running signal envelope (peak-with-decay). We
+        // update on EVERY frame regardless of state so the envelope
+        // is ready the instant we enter .speech, and so it can decay
+        // during long silences to release the relative cutoff.
+        let decayed = signalEnvelope * envelopeDecay
+        signalEnvelope = max(energy, decayed)
+
+        let isSpeech: Bool
+        switch state {
+        case .silence:
+            isSpeech = energy >= enterCutoff()
+        case .speech:
+            isSpeech = energy >= stayCutoff()
+        }
 
         switch state {
         case .silence:
@@ -206,14 +327,15 @@ final class UtteranceDetector {
                     pendingSpeechFrames = 0
                     pendingSpeechBuffer.removeAll(keepingCapacity: true)
                 }
-                // Update adaptive noise floor — but ONLY on deep-silence
-                // frames (energy well below the static threshold). Earlier
-                // we updated on every below-cutoff frame, which let a
-                // quiet talker's between-word audio pull the floor up,
-                // triggering a positive feedback loop (cutoff rises →
-                // more speech missed → floor rises further). With this
-                // gate, the floor reflects actual room noise, not
-                // borderline speech.
+                // Update adaptive noise floor — but ONLY on
+                // deep-silence frames (energy well below the static
+                // threshold). Earlier we updated on every
+                // below-cutoff frame, which let a quiet talker's
+                // between-word audio pull the floor up, triggering a
+                // positive feedback loop (cutoff rises → more speech
+                // missed → floor rises further). With this gate, the
+                // floor reflects actual room noise, not borderline
+                // speech.
                 if energy < rmsThreshold * 0.5 {
                     noiseFloor = noiseFloor * (1 - noiseFloorAlpha) + energy * noiseFloorAlpha
                 }
@@ -250,7 +372,7 @@ final class UtteranceDetector {
     private func emit() {
         let startSec = max(0, Double(currentStartSample) / sampleRate)
         let dur = Double(current.count) / sampleRate
-        vadLog.log("VAD emit utterance: startSec=\(startSec, privacy: .public) dur=\(dur, privacy: .public)s noiseFloor=\(self.noiseFloor, privacy: .public) speechFrames=\(self.speechFramesInCurrent, privacy: .public)")
+        vadLog.log("VAD emit utterance: startSec=\(startSec, privacy: .public) dur=\(dur, privacy: .public)s noiseFloor=\(self.noiseFloor, privacy: .public) envelope=\(self.signalEnvelope, privacy: .public) speechFrames=\(self.speechFramesInCurrent, privacy: .public)")
         onUtterance?(current, startSec)
     }
 
