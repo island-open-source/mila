@@ -293,6 +293,21 @@ final class RecordingSession: ObservableObject {
     private func consumeMic(_ buffer: AVAudioPCMBuffer) async {
         let samples = AudioConvert.samples(from: buffer)
         await MainActor.run { self.micLevel = AudioMeter.level(from: buffer) }
+        // Live-transcription feed is driven by the mic in ALL modes that
+        // include a mic (`.microphone` and `.meeting`). In meeting mode
+        // the file still mixes mic+system when paired, but the live
+        // feed must NOT wait on the pair — observed bug (1 Jun 2026):
+        // when the system-audio leg is silent (e.g. user is the only
+        // speaker), `flushPending` keeps `min(pendingMic, pendingSystem)
+        // == 0` so `write()` is never called and onLiveSamples never
+        // fires. Pressing Stop then flushes ~60s of buffered mic as one
+        // giant write, and the live pane shows nothing during the
+        // recording. Tradeoff: in meeting mode, live transcription only
+        // covers the mic side — the saved WAV still has the mix and
+        // gets a full post-recording transcription pass.
+        if let onLive = onLiveSamples {
+            onLive(samples[0..<samples.count])
+        }
         if source == .microphone {
             await write(samples)
         } else {
@@ -406,7 +421,13 @@ final class RecordingSession: ObservableObject {
         } catch {
             print("Audio file write error: \(error)")
         }
-        if let onLive = onLiveSamples {
+        // Note: onLiveSamples is NOT fired here. Live-transcription feed
+        // is driven by `consumeMic` / `consumeSystem` directly so the
+        // pair-wait for file mixing in meeting mode can't starve the
+        // live pane. See `consumeMic` for the meeting-mode rationale.
+        if source == .systemAudio, let onLive = onLiveSamples {
+            // For systemAudio-only recordings (no mic) we need this
+            // path to drive the live feed since `consumeMic` doesn't run.
             onLive(samples[0..<samples.count])
         }
     }
