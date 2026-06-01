@@ -432,6 +432,19 @@ final class QuickActionsController: ObservableObject {
         if let diar = liveDiarizer {
             liveTranscriber?.applySpeakerLabels(diar.intervals)
         }
+        // Push one final feed with the post-drain transcript so the
+        // LLM tail covers up to stop. Mirrors `.idle` handler's
+        // behavior; we skip the .idle drain here so we have to do
+        // the feed ourselves. `awaitFinalTick` then drains both the
+        // tick this feed kicks off AND any in-flight tick.
+        if liveAISettings?.enabled == true,
+           llmSettings?.isConfigured == true,
+           let transcriber = liveTranscriber {
+            let text = transcriber.formattedTranscript
+            if !text.isEmpty {
+                liveAISession?.feed(transcript: text)
+            }
+        }
         await liveAISession?.awaitFinalTick()
 
         // Snapshot final state. Safe to read now because `.idle`
