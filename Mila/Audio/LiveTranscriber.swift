@@ -328,7 +328,12 @@ final class LiveTranscriber: ObservableObject {
             padded = samples
         }
         let startedAt = Date()
-        let whisperSegs = await transcription.transcribeOnceSegments(samples: padded, language: language)
+        // VAD-bounded short utterances: use the WhisperEngine.computeAudioCtx
+        // formula (`audioCtx: nil`). This is the path the labelled-fixture
+        // sweep validated — see WhisperEngine.swift's `params.audio_ctx` block.
+        let whisperSegs = await transcription.transcribeOnceSegments(
+            samples: padded, language: language, audioCtx: nil
+        )
         let elapsed = Date().timeIntervalSince(startedAt)
         liveLog.log("LiveTranscriber utterance: samples=\(samples.count) padded=\(padded.count) elapsed=\(elapsed, privacy: .public)s segments=\(whisperSegs.count) startSec=\(startSec, privacy: .public) epoch=\(scheduledEpoch, privacy: .public) currentEpoch=\(self.epoch, privacy: .public)")
         guard !whisperSegs.isEmpty else { return }
@@ -395,7 +400,14 @@ final class LiveTranscriber: ObservableObject {
         let slice = Array(buffer[windowStartIndex..<total])
 
         let startedAt = Date()
-        let whisperSegs = await transcription.transcribeOnceSegments(samples: slice, language: language)
+        // Non-VAD fixed-window tick (legacy chunked live path). The slice is
+        // up to `windowSeconds` (= 30s default) of audio, not a VAD-bounded
+        // utterance, so the labelled-fixture sweep doesn't cover it. Opt out
+        // of the audio_ctx truncation; whisper's default 1500-token ctx
+        // applies.
+        let whisperSegs = await transcription.transcribeOnceSegments(
+            samples: slice, language: language, audioCtx: 0
+        )
         let elapsed = Date().timeIntervalSince(startedAt)
         liveLog.log("LiveTranscriber tick: samples=\(slice.count) elapsed=\(elapsed, privacy: .public)s segments=\(whisperSegs.count) lang=\(self.language, privacy: .public)")
         guard !whisperSegs.isEmpty else { return }

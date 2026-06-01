@@ -69,8 +69,17 @@ public actor WhisperEngine {
 
     /// Synchronous transcription of a complete sample buffer.
     /// `progress` is invoked with values in `0...1` from inside the C callback.
+    ///
+    /// `audioCtx` controls the whisper encoder's mel-context truncation
+    /// (see `TranscribingEngine.transcribe` for full semantics):
+    ///   * `nil`  → use `computeAudioCtx(sampleCount:)` (the live-VAD-tuned
+    ///     formula). Safe only for VAD-bounded short utterances.
+    ///   * `0`    → pass through whisper's default 1500-token (= 30s) context.
+    ///     Use for dictation and imported-file batch paths (no truncation).
+    ///   * positive Int32 → explicit override.
     public func transcribe(samples rawSamples: [Float],
                     language: String,
+                    audioCtx: Int32? = nil,
                     progress: (@Sendable (Float) -> Void)?,
                     isCancelled: (@Sendable () -> Bool)? = nil) throws -> [TranscriptSegment] {
         guard let ctx else {
@@ -110,14 +119,25 @@ public actor WhisperEngine {
         // that fully covers our samples gives a ~3-4x speedup on short clips.
         // See `computeAudioCtx` for the formula.
         //
-        // KNOWN: the existing labelled-fixture E2E (`e2e-transcription`
-        // workflow) flagged repetition / hallucination on the shortest
-        // clips (~1s, e.g. "this is quiet speech" → "this is quiet speech,
-        // this is quiet speech."). The user explicitly chose to keep this
-        // tradeoff for the perf win; we'll iterate on the formula's
-        // safety margins or floor in a follow-up rather than block the
-        // perf win on a perfect-quality fix.
-        params.audio_ctx = Self.computeAudioCtx(sampleCount: samples.count)
+        // SCOPE: the formula was validated only against the labelled-fixture
+        // sweep for VAD-bounded short utterances (the live transcription
+        // path). Other callers — dictation (sub-second to ~few-second
+        // hotkey clips) and imported-file batch transcription — pass
+        // `audioCtx = 0` to opt out and use whisper's default 1500-token
+        // context. The CI e2e sweep on ggml-tiny flagged short-clip WER
+        // regressions on at least one fixture (en_numbers_and_dates 5.17s:
+        // 0.29 → 0.36) under truncation, so we stay conservative and apply
+        // the speed-up only where the live VAD characteristics match the
+        // validated fixture distribution.
+        //
+        // KNOWN (live-VAD path): the existing labelled-fixture E2E
+        // (`e2e-transcription` workflow) flagged repetition / hallucination
+        // on the shortest clips (~1s, e.g. "this is quiet speech" →
+        // "this is quiet speech, this is quiet speech."). The user
+        // explicitly chose to keep this tradeoff for the perf win; we'll
+        // iterate on the formula's safety margins or floor in a follow-up
+        // rather than block the perf win on a perfect-quality fix.
+        params.audio_ctx = audioCtx ?? Self.computeAudioCtx(sampleCount: samples.count)
 
         let userBox = CallbackBox(progress: progress, isCancelled: isCancelled)
         let userPtr = Unmanaged.passRetained(userBox).toOpaque()
@@ -235,18 +255,26 @@ public actor WhisperEngine {
     /// pushed for a real fixture-driven sweep, which produced this table.
     ///
     /// Policy:
-    ///   * For audio shorter than the trained 30s window: use audio_ctx=750
-    ///     (= 15s capacity, comfortably covers our VAD-bounded 1-10s
-    ///     utterances with room to spare; one of two known-good values).
-    ///   * For audio >= 30s: return 0 (= "use whisper's default 1500").
+    ///   * For audio shorter than 15s: use audio_ctx=750 (= 15s capacity,
+    ///     covers our VAD-bounded 1-10s utterances with margin; one of two
+    ///     known-good values).
+    ///   * For audio 15s-30s: return 0 (= whisper's default 1500). At 750
+    ///     the encoder's capacity is only 15s of mel context, so a clip in
+    ///     this range would be silently TRUNCATED — past callers all went
+    ///     through the live-VAD path (max 10s) so this range was never
+    ///     exercised in production, but a `nil` audioCtx passed by any
+    ///     future caller in this range would lose audio. Falling back to
+    ///     the default keeps the formula self-correct.
+    ///   * For audio >= 30s: return 0 (whisper truncates to 30s anyway).
     static func computeAudioCtx(sampleCount: Int) -> Int32 {
         guard sampleCount > 0 else { return 0 }
         let sampleRate = WhisperAudioFormat.sampleRate
-        let fullWindowSamples = Int(sampleRate * 30.0)
-        if sampleCount >= fullWindowSamples { return 0 }
-        // 750 = 15s capacity — covers all our VAD-emitted utterances
-        // (max-cap 10s) with comfortable margin. The "discrete safe
-        // subdivision of 1500" point that whisper's encoder accepts.
+        // 750 mel ctx tokens = 15s of audio capacity (50 ctx tokens / sec
+        // after the encoder's 2x downsample). Past this we'd truncate.
+        let truncatedCapacitySamples = Int(sampleRate * 15.0)
+        if sampleCount >= truncatedCapacitySamples { return 0 }
+        // 750 — the "discrete safe subdivision of 1500" point that
+        // whisper's encoder accepts (see fixture sweep above).
         return 750
     }
 

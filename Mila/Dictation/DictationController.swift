@@ -195,8 +195,18 @@ final class DictationController: ObservableObject {
         // stays around purely for the overlay's "watch your words
         // appear" UX; the FINAL text comes from one whisper pass over
         // every sample we captured.
+        //
+        // `audioCtx: 0` opts out of WhisperEngine's live-VAD-tuned
+        // audio_ctx truncation. Dictation clips are hotkey-bounded
+        // (sub-second to a few seconds) and we don't have a labelled
+        // fixture set for that distribution — the CI e2e sweep on
+        // ggml-tiny showed short-clip WER regressions under truncation
+        // (en_numbers_and_dates 5.17s, 0.29 → 0.36). Use whisper's
+        // default 1500-token (= 30s) context to preserve baseline
+        // quality for dictation.
         let text = await transcription.transcribeOnce(samples: captured,
-                                                      language: action.languageCode)
+                                                      language: action.languageCode,
+                                                      audioCtx: 0)
 
         DictationOverlayWindow.shared.hide()
         state = .idle

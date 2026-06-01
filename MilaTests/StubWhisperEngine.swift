@@ -25,7 +25,7 @@ actor StubWhisperEngine: TranscribingEngine {
 
     private(set) var loadedModel: URL?
     private(set) var loadCallCount = 0
-    private(set) var transcribeCalls: [(samples: [Float], language: String)] = []
+    private(set) var transcribeCalls: [(samples: [Float], language: String, audioCtx: Int32?)] = []
     private(set) var concurrentInFlight = 0
     private(set) var maxConcurrentInFlight = 0
     private(set) var shutdownCount = 0
@@ -39,6 +39,7 @@ actor StubWhisperEngine: TranscribingEngine {
 
     func transcribe(samples: [Float],
                     language: String,
+                    audioCtx: Int32?,
                     progress: (@Sendable (Float) -> Void)?,
                     isCancelled: (@Sendable () -> Bool)?) async throws -> [TranscriptSegment] {
         if let err = nextError {
@@ -50,7 +51,7 @@ actor StubWhisperEngine: TranscribingEngine {
         maxConcurrentInFlight = max(maxConcurrentInFlight, concurrentInFlight)
         defer { concurrentInFlight -= 1 }
 
-        transcribeCalls.append((samples: samples, language: language))
+        transcribeCalls.append((samples: samples, language: language, audioCtx: audioCtx))
 
         let delay = delayQueue.isEmpty ? defaultDelay : delayQueue.removeFirst()
         if delay > 0 {

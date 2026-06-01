@@ -107,8 +107,15 @@ final class TranscriptionService: ObservableObject {
     /// English (and anything else) goes to the OpenAI turbo. If the
     /// language-best model isn't installed yet (download still in flight),
     /// we fall back to whatever's selected so the user gets *some* transcript.
-    func transcribeOnce(samples: [Float], language: String) async -> String {
-        let segs = await transcribeOnceSegments(samples: samples, language: language)
+    ///
+    /// `audioCtx` is forwarded to the engine — see
+    /// `TranscribingEngine.transcribe` for semantics. Defaults to `0`
+    /// (= whisper default 1500 ctx) because the dictation path is the
+    /// historical caller of this method and dictation has NOT been
+    /// validated against audio_ctx truncation. Callers that want the
+    /// VAD-tuned formula must pass `nil` explicitly.
+    func transcribeOnce(samples: [Float], language: String, audioCtx: Int32? = 0) async -> String {
+        let segs = await transcribeOnceSegments(samples: samples, language: language, audioCtx: audioCtx)
         return segs.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -117,7 +124,18 @@ final class TranscriptionService: ObservableObject {
     /// can keep per-segment timing through the live loop (required for
     /// rendering one line per utterance and for matching speakers to
     /// segments by time).
-    func transcribeOnceSegments(samples: [Float], language: String) async -> [TranscriptSegment] {
+    ///
+    /// `audioCtx` is forwarded to the engine — see
+    /// `TranscribingEngine.transcribe` for semantics. Callers MUST be
+    /// explicit:
+    ///   * `LiveTranscriber` (VAD-bounded short utterances) → `nil`.
+    ///   * Dictation (full-press audio) → `0`.
+    ///   * Batch worker → never goes through here (calls `engine.transcribe`
+    ///     directly with `0`).
+    /// There is no default — the wrong choice silently degrades transcription
+    /// quality on one path or the other, so make every call site declare its
+    /// intent.
+    func transcribeOnceSegments(samples: [Float], language: String, audioCtx: Int32?) async -> [TranscriptSegment] {
         let candidate = modelManager.model(for: language)
         guard let model = candidate,
               modelManager.isInstalled(model) else {
@@ -132,6 +150,7 @@ final class TranscriptionService: ObservableObject {
                                           displayName: model.displayName)
             let segs = try await engine.transcribe(samples: samples,
                                                    language: language,
+                                                   audioCtx: audioCtx,
                                                    progress: nil,
                                                    isCancelled: nil)
             serviceLog.log("transcribeOnceSegments: model=\(model.name, privacy: .public) lang=\(language, privacy: .public) samples=\(samples.count, privacy: .public) elapsed=\(Date().timeIntervalSince(startedAt), privacy: .public)s segs=\(segs.count, privacy: .public)")
@@ -311,6 +330,16 @@ final class TranscriptionService: ObservableObject {
             async let transcribeTask = engine.transcribe(
                 samples: samples,
                 language: working.language,
+                // Batch path: imported files / post-record full-WAV
+                // transcription. We don't have a labelled fixture set
+                // for this distribution (variable length, mic, noise
+                // profile), so opt out of the live-VAD-tuned audio_ctx
+                // truncation and use whisper's default 1500-token
+                // context. This is a deliberate fix from PR #32 review:
+                // applying the formula here regressed WER on the CI
+                // e2e short-clip case (en_numbers_and_dates 5.17s,
+                // 0.29 → 0.36 on ggml-tiny).
+                audioCtx: 0,
                 progress: { [weak self] p in
                     Task { @MainActor [weak self] in
                         guard let self else { return }
