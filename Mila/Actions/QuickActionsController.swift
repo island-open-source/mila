@@ -352,7 +352,6 @@ final class QuickActionsController: ObservableObject {
         // live pane. Now the dialog pops up instantly; the
         // background drain below updates the Recording (and thus
         // the sheet, which observes the store) as more data lands.
-        let vadActive = liveTranscriber?.useVAD == true
         let initialSegments = liveTranscriber?.segments ?? []
         let initialTranscriptSegments: [TranscriptSegment] = initialSegments.map { ls in
             TranscriptSegment(start: ls.startSeconds, end: ls.endSeconds,
@@ -364,8 +363,11 @@ final class QuickActionsController: ObservableObject {
         // Use `.running` so the sheet shows the "transcribing in
         // progress" status icon while the background drain finishes
         // up. The flip to `.completed` (or `.pending` → `.enqueue`
-        // path for non-VAD) happens at the end of the drain task.
-        let initialStatus: TranscriptionStatus = vadActive ? .running : .pending
+        // path for the empty-segments fallback) happens at the end of
+        // the drain task. Mirrors `useLiveTranscript` below: both VAD
+        // and chunk modes produce live segments we want to preserve,
+        // so the initial-status gate is segment-presence, not mode.
+        let initialStatus: TranscriptionStatus = initialSegments.isEmpty ? .pending : .running
         let recording = Recording(
             title: title,
             duration: duration,
@@ -454,7 +456,14 @@ final class QuickActionsController: ObservableObject {
         let finalSummary = (liveAISession?.summary ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let finalItems = liveAISession?.actionItems ?? []
-        let useLiveTranscript = !finalLiveSegments.isEmpty && vadActive
+        // Bugbot: chunk mode (useVAD=false) also accumulates real segments
+        // in the live pane while recording. The old `&& vadActive` gate
+        // wiped `fullText` to "" on save for chunk-mode recordings —
+        // the rename sheet would briefly show text and then go blank
+        // until batch transcription caught up. Treat any non-empty live
+        // segment list as authoritative; both modes produce keepable
+        // output.
+        let useLiveTranscript = !finalLiveSegments.isEmpty
         let finalTranscriptSegments: [TranscriptSegment] = finalLiveSegments.map { ls in
             TranscriptSegment(start: ls.startSeconds, end: ls.endSeconds,
                               text: ls.text, speaker: ls.speaker)

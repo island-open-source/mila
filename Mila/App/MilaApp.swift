@@ -867,10 +867,15 @@ struct MilaApp: App {
     /// Crash-recovery sweep + stale-status cleanup. Two things happen
     /// here at launch:
     ///   1. Any recording left in `.running` from a previous session
-    ///      (the app died while whisper was mid-transcription) is
-    ///      reset to `.failed`. Without this, the Queue view's
-    ///      "still-pending fallback" keeps showing those rows forever
-    ///      because the worker never publishes them.
+    ///      (the app died while whisper was mid-transcription OR while
+    ///      the stop-time live-drain in `QuickActionsController` was
+    ///      still in flight) is reset to `.pending` and re-enqueued for
+    ///      transcription — provided its `.wav` is still on disk.
+    ///      Without re-enqueue, the row would sit in `.running` forever
+    ///      (the worker never publishes it on the new process) and the
+    ///      Queue view's "still-pending fallback" keeps showing it.
+    ///      If the WAV is gone we fall back to `.failed` so the row
+    ///      doesn't loop forever trying to read a missing file.
     ///   2. Orphan .wav files re-attached by RecordingStore as
     ///      `.pending` are enqueued for transcription so the user
     ///      gets a usable transcript on the next launch without
@@ -883,11 +888,24 @@ struct MilaApp: App {
         // 1. Reset stale .running recordings. The current process
         //    hasn't started its worker loop yet — anything still
         //    flagged .running must be a leftover.
+        let fm = FileManager.default
         for recording in store.recordings where recording.status == .running {
+            let wavURL = store.audioURL(for: recording)
             var fixed = recording
-            fixed.status = .failed
-            store.update(fixed)
-            print("MilaApp: reset stale .running recording \(recording.audioFileName) to .failed")
+            if fm.fileExists(atPath: wavURL.path) {
+                // Stop-time drain or batch worker died mid-transcription;
+                // the audio is still on disk, so re-queue for a fresh
+                // batch run instead of stranding the row at `.failed`
+                // (which has no recovery path the user can self-serve).
+                fixed.status = .pending
+                store.update(fixed)
+                print("MilaApp: re-enqueuing stale .running recording \(recording.audioFileName)")
+                transcription.enqueue(fixed)
+            } else {
+                fixed.status = .failed
+                store.update(fixed)
+                print("MilaApp: reset stale .running recording \(recording.audioFileName) to .failed (WAV missing)")
+            }
         }
 
         // 2. Auto-enqueue recovered orphans.

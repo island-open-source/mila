@@ -73,6 +73,18 @@ final class TranscriptionService: ObservableObject {
     /// data race under strict concurrency.
     private let cancellation = CancellationFlag()
 
+    /// Tracks the in-flight observer registration. Held so the prewarm
+    /// path can `await` it before kicking off the first `loadIfNeeded`
+    /// — without that gate, an early prewarm could begin compiling the
+    /// CoreML encoder before the observer is installed on the engine
+    /// actor, and `isPreparingModel` would never flip to `true`. The
+    /// Record button would stay enabled and the user could start a
+    /// recording while the encoder was still cold (PR #32 / Bugbot #3).
+    ///
+    /// Lazily assigned at the end of `init` — implicitly-unwrapped so
+    /// we don't need a pre-init placeholder Task.
+    private var observerSetupTask: Task<Void, Never>!
+
     init(store: RecordingStore,
          modelManager: ModelManager,
          diarizationSettings: DiarizationSettings,
@@ -86,8 +98,16 @@ final class TranscriptionService: ObservableObject {
         // (which is itself MainActor-isolated). The closure is
         // `@Sendable` because the engine actor invokes it from its
         // own context.
+        //
+        // Capture the registration Task so `prewarm` (and any other
+        // entry point that calls `loadIfNeeded`) can await it before
+        // touching the engine. The engine actor would serialize calls
+        // FIFO anyway, but Task scheduling order between this Task
+        // and the prewarm Task is undefined — without the explicit
+        // await in those call sites, the first CoreML compile could
+        // fire before this observer landed.
         let serviceRef = self
-        Task {
+        self.observerSetupTask = Task { [engine] in
             await engine.setPreparationObserver { [weak serviceRef] preparing, status in
                 Task { @MainActor in
                     guard let serviceRef else { return }
@@ -120,8 +140,21 @@ final class TranscriptionService: ObservableObject {
         }
         let modelURL = modelManager.url(for: model)
         let displayName = model.displayName
+        // Capture as non-optional — `observerSetupTask` is implicitly
+        // unwrapped on the property but force-imports here would
+        // re-promote it to Optional inside the closure.
+        let observerTask: Task<Void, Never> = observerSetupTask
         print("TranscriptionService.prewarm: kicking off load for \(displayName)")
         Task.detached(priority: .userInitiated) { [engine] in
+            // Bugbot #3: ensure the preparation observer is registered
+            // BEFORE the first CoreML compile starts — otherwise the
+            // engine fires the "preparing" callback into a nil
+            // observer, `isPreparingModel` never flips to true, and the
+            // Record button stays enabled while the encoder is still
+            // cold. The Task in `init` serializes through the same
+            // engine actor, but await ordering between two independent
+            // Tasks is undefined, so we make it explicit here.
+            await observerTask.value
             do {
                 try await engine.loadIfNeeded(modelURL: modelURL, displayName: displayName)
                 print("TranscriptionService.prewarm: completed for \(displayName)")
@@ -208,6 +241,9 @@ final class TranscriptionService: ObservableObject {
         let modelURL = modelManager.url(for: model)
         let startedAt = Date()
         serviceLog.log("transcribeOnceSegments: loading model=\(model.name, privacy: .public) at \(modelURL.path, privacy: .public)")
+        // Bugbot #3: make sure the preparation observer is installed
+        // before `loadIfNeeded` — see `init` for the race.
+        await observerSetupTask.value
         do {
             try await engine.loadIfNeeded(modelURL: modelURL,
                                           displayName: model.displayName)
@@ -333,6 +369,10 @@ final class TranscriptionService: ObservableObject {
         }
 
         print("Transcribe begin: \(working.title) [\(recordingID.uuidString.prefix(8))]")
+
+        // Bugbot #3: make sure the preparation observer is installed
+        // before `loadIfNeeded` — see `init` for the race.
+        await observerSetupTask.value
 
         do {
             try await engine.loadIfNeeded(modelURL: modelManager.url(for: model),
