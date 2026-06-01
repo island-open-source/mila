@@ -186,10 +186,15 @@ final class UtteranceDetectorTests: XCTestCase {
         det.ingest(noise(seconds: 1.2, rms: 0.08, seed: 0x11)[...])
         // Inter-phrase "silence" at RMS 0.018 — well above the legacy
         // absolute cutoff of 0.012, but only 0.225× the envelope. The
-        // envelope-relative cutoff (0.40 × envelope ≈ 0.032, then × 0.5
-        // stay-ratio = 0.016) is still above 0.018 / sqrt frame variance,
-        // so most frames register as silent. 700ms is enough to cross
-        // the 500ms default silenceMs threshold.
+        // envelope-relative cutoff is 0.40 × envelope ≈ 0.032 (the
+        // relative portion is NOT scaled by stayCutoffRatio — only the
+        // absolute portion is; envelopeSilenceRatio already sits between
+        // syllable-dip and inter-phrase-silence territory, so halving
+        // it would slide it into syllable-dip range). stayCutoff =
+        // max(absCutoff × 0.5, relCutoff) = max(~0.006, 0.032) ≈ 0.032,
+        // which is above the 0.018 inter-phrase RMS so frames register
+        // as silent. 700ms is enough to cross the 500ms default
+        // silenceMs threshold.
         det.ingest(noise(seconds: 0.7, rms: 0.018, seed: 0x22)[...])
         // Phrase 2: 1.2s more speech at peak RMS 0.08.
         det.ingest(noise(seconds: 1.2, rms: 0.08, seed: 0x33)[...])
