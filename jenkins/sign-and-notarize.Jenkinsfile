@@ -18,6 +18,8 @@ pipeline {
              description: 'Git ref to build (branch, tag, or commit SHA).')
       booleanParam(name: 'skipNotarize', defaultValue: false,
              description: 'Sign only; skip the notarytool submit + staple step.')
+      booleanParam(name: 'publishUpdate', defaultValue: true,
+             description: 'After notarizing, publish to the Sparkle update channel (upload ZIP/DMG + appcast.xml to S3). Ignored when skipNotarize is true.')
       string(name: 'sharedLibraryRef', defaultValue: 'stable',
              description: 'Git ref for shared-library.')
     }
@@ -32,7 +34,14 @@ pipeline {
             if (!env.MILA_VERSION) {
               error "Could not extract MARKETING_VERSION from project.yml"
             }
-            echo "Building Mila v${env.MILA_VERSION} at ref ${params.gitRef}"
+            env.MILA_BUILD = sh(
+              script: '''awk -F'"' '/^[[:space:]]+CURRENT_PROJECT_VERSION:/ {print $2; exit}' project.yml''',
+              returnStdout: true
+            ).trim()
+            if (!env.MILA_BUILD) {
+              error "Could not extract CURRENT_PROJECT_VERSION from project.yml"
+            }
+            echo "Building Mila v${env.MILA_VERSION} (build ${env.MILA_BUILD}) at ref ${params.gitRef}"
           }
         }
       }
@@ -102,6 +111,25 @@ pipeline {
             codesign -d -r- "${MOUNT}/Mila.app" 2>&1 | grep designated || true
             hdiutil detach "$MOUNT"
           '''
+        }
+      }
+      stage('Publish Sparkle update') {
+        // Only for real (notarized) releases. Uploads the EdDSA-signed update
+        // ZIP + DMG and refreshes appcast.xml on the S3 update channel, using
+        // the mac-builder agent's IAM grant for S3. The Sparkle private key
+        // (whose public half ships in Mila) comes from the Jenkins credential.
+        when { expression { params.publishUpdate && !params.skipNotarize } }
+        steps {
+          withCredentials([string(credentialsId: 'mila-sparkle-private-key',
+                                  variable: 'SPARKLE_PRIVATE_KEY')]) {
+            sh '''
+              set -euo pipefail
+              DMG="${WORKSPACE}/Mila-${MILA_VERSION}.dmg"
+              SPARKLE_BIN="${WORKSPACE}/build-release/SourcePackages/artifacts/sparkle/Sparkle/bin"
+              chmod +x scripts/publish-sparkle.sh
+              OUTPUT_DIR="${WORKSPACE}" SPARKLE_BIN="$SPARKLE_BIN" scripts/publish-sparkle.sh "$DMG" "$MILA_VERSION" "$MILA_BUILD"
+            '''
+          }
         }
       }
     }
