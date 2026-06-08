@@ -333,10 +333,15 @@ final class DiarizationBootstrap: ObservableObject {
         }.value
     }
 
-    /// torch ships ~90 MB of un-signed dylibs in torch/lib/. macOS won't
-    /// block dlopen from an ad-hoc-signed Python process today, but signing
-    /// them keeps the install consistent with the bundled tree and avoids
-    /// surprises if Apple tightens library validation later.
+    /// torch ships ~90 MB of un-signed dylibs in torch/lib/. We ad-hoc sign
+    /// them here for tidiness, but the load only succeeds because the bundled
+    /// Python interpreter carries `com.apple.security.cs.disable-library-
+    /// validation` (applied in scripts/sign-and-notarize.sh). WITHOUT that
+    /// entitlement, a notarized (Island-signed, hardened-runtime) interpreter
+    /// refuses to dlopen these ad-hoc dylibs — "different Team IDs" — and
+    /// `import torch` fails, silently breaking diarization. (Pre-notarization
+    /// the interpreter was itself ad-hoc, so library validation never kicked
+    /// in; that's why this regressed only once releases became notarized.)
     private func signFreshDylibs() async throws {
         // Sign both torch/ and torchaudio/ — torch ships most of the
         // dylibs (~90 MB) but torchaudio has a handful of its own.

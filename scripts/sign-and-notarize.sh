@@ -72,6 +72,37 @@ while IFS= read -r -d '' f; do
   sign_one "$f"
 done < <(find "$STAGED_APP" -depth \( -name "*.framework" -o -name "*.xpc" -o -name "*.app" \) -print0)
 
+# The bundled Python interpreter loads pip-installed torch dylibs that are
+# ad-hoc-signed at runtime (DiarizationBootstrap.signFreshDylibs). Under
+# hardened runtime, library validation rejects any dylib whose Team ID
+# differs from the loading process — and post-notarization that's EVERY
+# torch dylib (Island-signed Python vs ad-hoc torch). Without disabling
+# library validation on the interpreter, `import torch` dies with
+# "different Team IDs" and diarization silently fails in every notarized
+# build. Re-sign the interpreter(s) WITH that entitlement after the blanket
+# passes above (so this signature wins) and before the outer bundle seal.
+PYTHON_ENTITLEMENTS="$(dirname "$0")/python-runtime.entitlements"
+if [[ -f "$PYTHON_ENTITLEMENTS" ]]; then
+  echo "=== Re-signing bundled Python interpreter(s) with library validation disabled"
+  signed_python=0
+  while IFS= read -r -d '' py; do
+    if file -b "$py" 2>/dev/null | grep -q "Mach-O"; then
+      echo "  sign (lib-val disabled): $py"
+      codesign --force --options runtime --timestamp \
+        --entitlements "$PYTHON_ENTITLEMENTS" \
+        --keychain "$KEYCHAIN_PATH" \
+        --sign "$CODESIGN_IDENTITY" \
+        "$py"
+      signed_python=$((signed_python + 1))
+    fi
+  done < <(find "$STAGED_APP" -type f -path "*/PythonRuntime/*/bin/python3*" -print0)
+  if [[ "$signed_python" -eq 0 ]]; then
+    echo "  note: no bundled Python interpreter found (diarization runtime not bundled in this build)"
+  fi
+else
+  echo "warning: $PYTHON_ENTITLEMENTS not found — bundled Python will lack disable-library-validation; diarization will fail post-notarize" >&2
+fi
+
 echo "=== Codesigning the main app bundle with hardened runtime + entitlements"
 codesign --force --options runtime --timestamp \
   --entitlements "$ENTITLEMENTS" \

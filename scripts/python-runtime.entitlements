@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the bundled Python interpreter (Contents/Resources/
+  PythonRuntime/.../bin/python3.x), applied by scripts/sign-and-notarize.sh.
+
+  The diarization daemon runs this interpreter and imports torch, whose
+  native dylibs are pip-installed into ~/Library/Application Support/Mila/
+  torch-site-packages at runtime and ad-hoc-signed (no Team ID) by
+  DiarizationBootstrap.signFreshDylibs. Under hardened runtime, macOS
+  library validation refuses to dlopen any dylib whose Team ID differs from
+  the loading process. Post-notarization the interpreter is signed with
+  Island's Developer ID, so EVERY torch dylib is "different Team IDs" and
+  `import torch` dies with that OSError — silently breaking diarization in
+  every notarized build (1.8.2, 1.8.3). disable-library-validation lifts
+  that check for this process only. allow-jit + allow-unsigned-executable-
+  memory cover torch/Metal codegen under hardened runtime.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+</dict>
+</plist>
