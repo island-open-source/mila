@@ -1,5 +1,8 @@
 import Foundation
 import Combine
+import OSLog
+
+private let recStoreLog = Logger(subsystem: "io.island.whisper.IslandWhisper", category: "RecordingStore")
 
 /// Persists recordings + their metadata under Application Support/Mila.
 ///
@@ -167,6 +170,95 @@ final class RecordingStore: ObservableObject {
 
     func audioURL(for recording: Recording) -> URL {
         recordingsDirectory.appendingPathComponent(recording.audioFileName)
+    }
+
+    /// Total bytes used by recording audio files on disk — drives the
+    /// storage cap (`RecordingStorageSettings.limitBytes`). Sums the audio
+    /// files of all known recordings (trashed included; they occupy disk
+    /// until purged). Sidecars (.txt/.srt/.json) are negligible and
+    /// omitted. Best-effort: unreadable files count as 0.
+    func currentUsageBytes() -> Int64 {
+        var total: Int64 = 0
+        for rec in recordings {
+            let url = audioURL(for: rec)
+            if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                total += Int64(size)
+            }
+        }
+        return total
+    }
+
+    /// Recordings with a compression in flight — guards against two
+    /// `compressRecordingAudio` runs overlapping for the same id.
+    private var compressingIDs: Set<UUID> = []
+
+    /// Transcode a recording's WAV to AAC/.m4a, point the recording at the
+    /// smaller file, and delete the WAV. The audio base name is unchanged
+    /// (only `.wav`→`.m4a`), so the `.txt`/`.srt`/`.summary.txt` sidecars
+    /// (derived from the base) keep their names. No-op when the audio
+    /// isn't a WAV (already compressed / imported m4a) or is missing.
+    /// Best-effort: a failed encode leaves the WAV untouched.
+    func compressRecordingAudio(id: UUID) async {
+        guard let rec = recordings.first(where: { $0.id == id }) else { return }
+        // Only compress finished recordings. A .pending/.running recording
+        // is still being read by the transcription queue (whisper +
+        // diarizer subprocess) — transcoding + deleting its WAV mid-flight
+        // would break those reads.
+        guard rec.status == .completed else { return }
+        let src = audioURL(for: rec)
+        guard src.pathExtension.lowercased() == "wav",
+              FileManager.default.fileExists(atPath: src.path) else { return }
+        // Prevent two compressions of the SAME recording from overlapping
+        // (post-stop hook + the reclaim action, or duplicate completion
+        // tasks). check+insert is synchronous on the main actor before the
+        // first `await`, so it's atomic — otherwise the loser would delete
+        // the winner's freshly-written .m4a in its stale-metadata branch
+        // below, leaving the recording with no audio on disk.
+        guard !compressingIDs.contains(id) else { return }
+        compressingIDs.insert(id)
+        defer { compressingIDs.remove(id) }
+        let dstName = (rec.audioFileName as NSString).deletingPathExtension + ".m4a"
+        let dst = recordingsDirectory.appendingPathComponent(dstName)
+        do {
+            try await AudioCompressor.compress(wavURL: src, toM4A: dst)
+        } catch {
+            recStoreLog.error("compressRecordingAudio failed for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            try? FileManager.default.removeItem(at: dst)  // don't leave a partial m4a
+            return
+        }
+        // Re-fetch by id: the recording may have been edited/removed during
+        // the (off-main) encode. Only swap if it's still the same WAV.
+        guard let idx = recordings.firstIndex(where: { $0.id == id }),
+              recordings[idx].audioFileName == rec.audioFileName else {
+            try? FileManager.default.removeItem(at: dst)
+            return
+        }
+        recordings[idx].audioFileName = dstName
+        persist()
+        try? FileManager.default.removeItem(at: src)
+        recStoreLog.log("compressed recording \(id, privacy: .public) → \(dstName, privacy: .public)")
+    }
+
+    /// Number of finished recordings still stored as WAV (i.e. compressible).
+    /// Drives the "Compress existing recordings" affordance. Pending/running
+    /// recordings are excluded — their WAV is still being transcribed.
+    func wavRecordingCount() -> Int {
+        recordings.filter { $0.status == .completed && $0.audioFileName.lowercased().hasSuffix(".wav") }.count
+    }
+
+    /// Transcode every WAV recording to m4a — the one-time "reclaim space"
+    /// action. Sequential to bound CPU/memory. `onProgress(done, total)`
+    /// fires on the main actor after each. Returns the count converted.
+    @discardableResult
+    func compressAllWAVRecordings(onProgress: (@MainActor (Int, Int) -> Void)? = nil) async -> Int {
+        let wavIDs = recordings
+            .filter { $0.status == .completed && $0.audioFileName.lowercased().hasSuffix(".wav") }
+            .map(\.id)
+        for (i, id) in wavIDs.enumerated() {
+            await compressRecordingAudio(id: id)
+            onProgress?(i + 1, wavIDs.count)
+        }
+        return wavIDs.count
     }
 
     /// Path of the per-recording `.txt` transcript sidecar. The file may not

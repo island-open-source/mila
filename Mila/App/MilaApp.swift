@@ -225,6 +225,7 @@ struct MilaApp: App {
         actions.liveTranscriber = liveTrans
         actions.liveDiarizer = liveDiar
         actions.summarizer = summarizer
+        actions.storageSettings = storage
         let meetingSettings = MeetingDetectionSettings()
         let detector = MeetingDetector()
         let promptCoordinator = MeetingPromptCoordinator(
@@ -253,10 +254,12 @@ struct MilaApp: App {
         _liveSpeakerDiarizer = StateObject(wrappedValue: liveDiar)
         _liveAISession = StateObject(wrappedValue: liveSession)
         _recordingSummarizer = StateObject(wrappedValue: summarizer)
-        _dictation = StateObject(wrappedValue: DictationController(store: store,
-                                                                    transcription: svc,
-                                                                    hotkeySettings: hotkeys,
-                                                                    liveTranscriber: dictationTrans))
+        let dictationController = DictationController(store: store,
+                                                      transcription: svc,
+                                                      hotkeySettings: hotkeys,
+                                                      liveTranscriber: dictationTrans)
+        dictationController.storageSettings = storage
+        _dictation = StateObject(wrappedValue: dictationController)
     }
 
     var body: some Scene {

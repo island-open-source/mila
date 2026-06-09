@@ -126,9 +126,29 @@ final class QuickActionsController: ObservableObject {
     /// the hook in TranscriptionService and doesn't touch this.
     var summarizer: RecordingSummarizer?
 
+    /// Late-bound by MilaApp. Enforces the storage cap at record start:
+    /// new recordings are blocked once the library reaches `limitBytes`.
+    /// Existing / in-progress recordings are never touched.
+    var storageSettings: RecordingStorageSettings?
+
     /// Active silence-watch task — cancelled when the recording stops so
     /// we never fire the warning for a recording that's already over.
     private var silenceWatchTask: Task<Void, Never>?
+
+    /// Returns true — and sets a user-facing `lastError` — when starting
+    /// a new recording would exceed the configured storage cap. Called at
+    /// the top of every record-start path.
+    private func storageCapReached() -> Bool {
+        guard let storageSettings else { return false }
+        let used = store.currentUsageBytes()
+        guard used >= storageSettings.limitBytes else { return false }
+        let usedGB = Double(used) / 1_073_741_824.0
+        transcription.lastError = String(
+            format: "Storage limit reached (%.1f of %.0f GB used). Free up space or raise the limit in Settings ▸ Storage.",
+            usedGB, storageSettings.limitGigabytes)
+        quickActionsLog.error("recording blocked — storage cap reached (used=\(used, privacy: .public) limit=\(storageSettings.limitBytes, privacy: .public))")
+        return true
+    }
 
     init(session: RecordingSession,
          store: RecordingStore,
@@ -178,6 +198,40 @@ final class QuickActionsController: ObservableObject {
         }
     }
 
+    /// Unified Home entry point: the main window has independent
+    /// Microphone and App-audio toggles, and the (mic, app) combination
+    /// selects the source:
+    ///   - mic + app  → `.meeting` (mic clocked, system audio mixed in)
+    ///   - mic only   → `.microphone`
+    ///   - app only   → `.systemAudio` (all system audio, no mic — the
+    ///     live feed is driven straight off the system-audio stream, so
+    ///     there's no mic master-clock to stall on)
+    ///   - neither    → no-op (the Record button is disabled in this case)
+    ///
+    /// App-only routes through `startAppRecording(app: nil, ...)` — the
+    /// same path the old More ▸ App Audio picker used, minus the
+    /// per-app selection (Home captures the whole system mix).
+    func toggleRecord(microphone: Bool, appAudio: Bool) async {
+        if isFinalizingRecording {
+            quickActionsLog.log("toggleRecord ignored — finalize in progress")
+            return
+        }
+        if isRecording {
+            await stopRecording()
+            return
+        }
+        guard activeJob == .none else { return }
+        guard microphone || appAudio else {
+            quickActionsLog.log("toggleRecord ignored — both Microphone and App audio are off")
+            return
+        }
+        if microphone {
+            await startRecording(withSystemAudio: appAudio)
+        } else {
+            await startAppRecording(app: nil, includeMic: false)
+        }
+    }
+
     private func startRecording(withSystemAudio: Bool) async {
         // Controller-side counterpart to HomeView's
         // `.disabled(... transcription.isPreparingModel)`. The button
@@ -191,6 +245,8 @@ final class QuickActionsController: ObservableObject {
             quickActionsLog.log("startRecording ignored — model still preparing (Neural Engine compile)")
             return
         }
+        // Storage cap: refuse to start if the library is already full.
+        if storageCapReached() { return }
         // Pre-flight the mic auth check — if denied we want to point the
         // user at System Settings (like we do for screen recording),
         // not surface a vague "operation couldn't be completed" error
@@ -283,6 +339,8 @@ final class QuickActionsController: ObservableObject {
             quickActionsLog.log("startAppRecording ignored — model still preparing (Neural Engine compile)")
             return
         }
+        // Storage cap: refuse to start if the library is already full.
+        if storageCapReached() { return }
         // When the user opted into capturing their mic alongside system
         // audio, pre-flight the mic auth check too — otherwise the same
         // vague-error-after-rename trap as Voice Memo.
@@ -589,6 +647,12 @@ final class QuickActionsController: ObservableObject {
             // hook).
             TranscriptExporter.writeSRT(for: updated, in: store.recordingsDirectory)
             summarizer?.summarizeIfNeeded(updated)
+            // Shrink storage: the live transcript is authoritative and the
+            // rediarize above is done reading the WAV, so transcode it to
+            // m4a in the background. (The batch path does this via its own
+            // completion hook in TranscriptionService.)
+            let compressID = updated.id
+            Task { await store.compressRecordingAudio(id: compressID) }
         } else {
             // Chunk mode or no live segments: enqueue for batch
             // transcription. For chunk mode the batch pass overwrites
@@ -671,6 +735,9 @@ final class QuickActionsController: ObservableObject {
     }
 
     func transcribeFile(_ url: URL) async {
+        // Storage cap applies to imports too — they copy a new audio file
+        // into the library, same as a recording.
+        if storageCapReached() { return }
         activeJob = .importingFile(url)
         do {
             let recording = try await FileTranscriber.importFile(

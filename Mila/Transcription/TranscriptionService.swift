@@ -543,6 +543,13 @@ final class TranscriptionService: ObservableObject {
             if working.status == .completed {
                 TranscriptExporter.writeSRT(for: working, in: store.recordingsDirectory)
                 onTranscriptionCompleted?(working, hadSummaryBeforeRun)
+                // Shrink storage: transcode the WAV to m4a now that
+                // transcription + diarization are done reading it. Runs in
+                // the background so it doesn't hold up the queue; playback
+                // and re-transcribe read m4a natively, re-diarize decodes
+                // it. No-op on already-compressed (imported) audio.
+                let compressID = working.id
+                Task { await store.compressRecordingAudio(id: compressID) }
             }
         } catch is CancellationError {
             // The user hit Cancel mid-run. The rename sheet's coordinator is

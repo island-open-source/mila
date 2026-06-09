@@ -184,6 +184,18 @@ enum SpeakerDiarizer {
         guard let modelsPath = bundledModelsPath else {
             throw Error.diarizationFailed("Bundled diarization models not found in app")
         }
+        // The pyannote `soundfile`/libsndfile backend can't read AAC/.m4a,
+        // so decode compressed recordings to a temp WAV first. WAV inputs
+        // pass straight through. The temp file is cleaned up on exit.
+        var pythonInputURL = wavURL
+        var tempWAVToCleanUp: URL?
+        if wavURL.pathExtension.lowercased() != "wav" {
+            pythonInputURL = try AudioCompressor.decodeToTempWAV(wavURL)
+            tempWAVToCleanUp = pythonInputURL
+        }
+        defer {
+            if let temp = tempWAVToCleanUp { try? FileManager.default.removeItem(at: temp) }
+        }
         let resolvedPython = resolvePython(userConfigured: pythonPath)
         let extraEnv = pythonEnvironment()
 
@@ -250,7 +262,7 @@ enum SpeakerDiarizer {
 
         let result = try await runPython(
             path: resolvedPython,
-            arguments: ["-c", script, wavURL.path, modelsPath],
+            arguments: ["-c", script, pythonInputURL.path, modelsPath],
             environment: extraEnv
         )
         guard result.exitCode == 0 else {

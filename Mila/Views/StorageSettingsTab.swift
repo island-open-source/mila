@@ -26,11 +26,14 @@ struct StorageSettingsTab: View {
     @EnvironmentObject private var actions: QuickActionsController
 
     @State private var lastError: String?
+    @State private var isCompressing = false
+    @State private var compressStatus: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             header
             currentLocationCard
+            storageLimitCard
             if storage.lastResolutionWasStale {
                 staleBookmarkNotice
             }
@@ -92,6 +95,85 @@ struct StorageSettingsTab: View {
         }
         .padding(12)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// Storage cap: a stepper for the GB limit + the current usage. New
+    /// recordings are blocked at the cap (see
+    /// `QuickActionsController.storageCapReached`); existing recordings
+    /// are never auto-deleted.
+    private var storageLimitCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Image(systemName: "internaldrive.fill")
+                    .foregroundStyle(.tint)
+                Text("Storage limit")
+                    .font(.callout.weight(.semibold))
+                Spacer()
+                Text(usageSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Stepper(value: Binding(get: { storage.limitGigabytes },
+                                   set: { storage.limitGigabytes = $0 }),
+                    in: 1...500, step: 1) {
+                Text("Cap new recordings at \(Int(storage.limitGigabytes.rounded())) GB")
+                    .font(.callout)
+            }
+            Text("New recordings are blocked once the library reaches this size. Existing recordings are never deleted automatically — reclaim space below or raise the limit.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            HStack(spacing: 8) {
+                Button { compressExisting() } label: {
+                    if isCompressing {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text(compressStatus ?? "Compressing…")
+                        }
+                    } else {
+                        Text("Compress existing recordings")
+                    }
+                }
+                .disabled(isCompressing || actions.isRecording || store.wavRecordingCount() == 0)
+                .help(actions.isRecording
+                      ? "Stop the current recording before compressing"
+                      : "Transcode older WAV recordings to m4a to reclaim disk space")
+                .accessibilityIdentifier("storage.compressExisting.button")
+                Spacer()
+                Text(isCompressing ? (compressStatus ?? "") : reclaimSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var reclaimSummary: String {
+        let n = store.wavRecordingCount()
+        if n == 0 { return "All recordings compressed" }
+        return "\(n) WAV recording\(n == 1 ? "" : "s") can be compressed"
+    }
+
+    private func compressExisting() {
+        guard !isCompressing, !actions.isRecording else { return }
+        isCompressing = true
+        compressStatus = "Starting…"
+        Task { @MainActor in
+            let total = await store.compressAllWAVRecordings { done, count in
+                compressStatus = "Compressed \(done) of \(count)…"
+            }
+            isCompressing = false
+            compressStatus = total > 0 ? "Compressed \(total) recording\(total == 1 ? "" : "s")." : nil
+        }
+    }
+
+    private var usageSummary: String {
+        let usedGB = Double(store.currentUsageBytes()) / 1_073_741_824.0
+        return String(format: "%.2f GB used", usedGB)
     }
 
     private var staleBookmarkNotice: some View {

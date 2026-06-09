@@ -73,6 +73,29 @@ enum AudioConvert {
         let converted = try toWhisperFormat(inputBuffer)
         return samples(from: converted)
     }
+
+    /// Write 16 kHz mono float32 samples as an IEEE-float WAV. Used to
+    /// hand the Python diarizer (soundfile/libsndfile) a readable file
+    /// when the recording is a compressed .m4a it can't open.
+    static func writeWhisperWAV(samples: [Float], to url: URL) throws {
+        let format = WhisperAudioFormat.pcmFloat32
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format,
+                                            frameCapacity: AVAudioFrameCount(max(1, samples.count))) else {
+            throw NSError(domain: "AudioConvert", code: 10,
+                          userInfo: [NSLocalizedDescriptionKey: "Could not allocate WAV buffer."])
+        }
+        buffer.frameLength = AVAudioFrameCount(samples.count)
+        if let channel = buffer.floatChannelData?[0] {
+            samples.withUnsafeBufferPointer { src in
+                if let base = src.baseAddress { channel.update(from: base, count: samples.count) }
+            }
+        }
+        let file = try AVAudioFile(forWriting: url,
+                                   settings: format.settings,
+                                   commonFormat: .pcmFormatFloat32,
+                                   interleaved: false)
+        try file.write(from: buffer)
+    }
 }
 
 /// Computes a 0...1 RMS level from an audio buffer for VU meters.

@@ -49,6 +49,9 @@ final class DictationController: ObservableObject {
     private let transcription: TranscriptionService
     private let hotkeySettings: HotkeySettings
     private var bindingsObserver: AnyCancellable?
+    /// Late-bound by MilaApp. Enforces the storage cap for dictation too,
+    /// so a full library blocks new clips consistently with Settings copy.
+    var storageSettings: RecordingStorageSettings?
 
     init(store: RecordingStore,
          transcription: TranscriptionService,
@@ -109,6 +112,13 @@ final class DictationController: ObservableObject {
     // MARK: - Recording
 
     private func start(action: HotkeyAction) async {
+        // Storage cap: a full library blocks new dictation clips too
+        // (consistent with Settings copy). A beep is the right-sized signal
+        // for the hotkey flow — rare edge, and the user can free space.
+        if let storageSettings, store.currentUsageBytes() >= storageSettings.limitBytes {
+            NSSound.beep()
+            return
+        }
         // Snapshot the user's frontmost app FIRST, before we touch any UI or
         // the audio engine. Even though our overlay is a non-activating
         // panel, the user might click into Mila mid-take, and we

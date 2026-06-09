@@ -1,10 +1,11 @@
 import SwiftUI
 
 /// "More" detail page accessed via the sidebar. Houses the lower-priority
-/// entry points that used to sit on Home as tiles — file import, app
-/// audio capture, and video → SRT subtitling. Stripping them off Home
-/// kept the main screen focused on the single Record button; users who
-/// need these reach them in one extra click via the sidebar.
+/// entry points that used to sit on Home as tiles — file import and
+/// video → SRT subtitling. (App-audio capture is now a first-class
+/// toggle on Home, not a More entry.) Stripping these off Home kept the
+/// main screen focused on the Record button; users who need them reach
+/// them in one extra click via the sidebar.
 struct MoreView: View {
     @EnvironmentObject private var actions: QuickActionsController
 
@@ -22,11 +23,9 @@ struct MoreView: View {
                             subtitle: "Import audio or video to transcribe.") {
                         Task { await actions.openFiles() }
                     }
-                    MoreRow(icon: "speaker.wave.3.fill",
-                            title: "App Audio",
-                            subtitle: "Capture audio from a specific app — useful for non-mic sources.") {
-                        Task { await actions.presentAppPicker() }
-                    }
+                    // App-audio capture moved to the Home screen as a
+                    // first-class "App audio" toggle (alongside the
+                    // Microphone toggle), so it's no longer a More entry.
                     MoreRow(icon: "captions.bubble.fill",
                             title: "Subtitle Video",
                             subtitle: "Pick a video, get a Mila-transcribed .srt sidecar.") {

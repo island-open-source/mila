@@ -21,11 +21,23 @@ struct HomeView: View {
     @Binding var selection: SidebarSelection?
     let search: String
 
-    /// User's preference for capturing the system's audio mix alongside
-    /// the mic. Defaults to ON because the main use case is meeting /
-    /// content transcription; mic-only dictation users untick it once
-    /// and the choice sticks across launches.
+    /// User's preference for capturing the system's audio mix. Defaults
+    /// to ON because the main use case is meeting / content
+    /// transcription. Paired with `recordMicrophone` below — the two
+    /// toggles select the source (mic+app = meeting, mic-only =
+    /// microphone, app-only = system audio). The choice sticks across
+    /// launches.
     @AppStorage("home.record.withSystemAudio") private var withSystemAudio: Bool = true
+
+    /// User's preference for capturing the microphone. Defaults to ON
+    /// (the historical behaviour — Record always included the mic).
+    /// Turning this OFF while App audio is ON records system audio only
+    /// (no mic), which is what you want to capture an app/meeting you're
+    /// only listening to.
+    @AppStorage("home.record.microphone") private var recordMicrophone: Bool = true
+
+    /// At least one source must be on to record.
+    private var canRecord: Bool { recordMicrophone || withSystemAudio }
 
     var body: some View {
         VStack {
@@ -33,7 +45,7 @@ struct HomeView: View {
             VStack(spacing: 24) {
                 header
                 heroAction
-                appAudioToggle
+                sourceToggles
                 dictationHint
             }
             .padding(.horizontal, 24)
@@ -84,10 +96,11 @@ struct HomeView: View {
             preparationStatus: transcription.preparationStatus,
             languageFlag: languageSettings.current.flagEmoji,
             languageName: languageSettings.current.displayName,
+            microphoneEnabled: recordMicrophone,
             withSystemAudio: withSystemAudio,
             liveAIEnabled: liveAISettings.enabled && llmSettings.isConfigured
         ) {
-            Task { await actions.toggleRecord(withSystemAudio: withSystemAudio) }
+            Task { await actions.toggleRecord(microphone: recordMicrophone, appAudio: withSystemAudio) }
         }
         .frame(maxWidth: 460)
         // Belt-and-suspenders with the controller-side guard: greying
@@ -99,29 +112,51 @@ struct HomeView: View {
         // during the compile window would start a recording the encoder
         // can't yet transcribe (segments=0). Block the button until the
         // engine reports ready.
-        .disabled(actions.isFinalizingRecording || transcription.isPreparingModel)
+        .disabled(actions.isFinalizingRecording || transcription.isPreparingModel || !canRecord)
     }
 
-    /// Small toggle below the Record button. Default-on. Disabled while
-    /// a recording is in flight so the user can't change the mode
-    /// mid-capture (the engine is already running against the chosen
-    /// source pair).
-    private var appAudioToggle: some View {
-        Toggle(isOn: $withSystemAudio) {
-            HStack(spacing: 6) {
-                Image(systemName: "speaker.wave.2.fill")
-                    .font(.callout)
-                    .foregroundStyle(.tint)
-                Text("Also record app audio")
-                    .font(.callout)
+    /// The two independent source toggles below the Record button:
+    /// Microphone and App audio. Both default-on (= meeting capture).
+    /// Turn the mic off to record app audio only; turn app audio off for
+    /// a plain voice memo. Disabled while a recording is in flight so the
+    /// user can't change the source mid-capture. When both are off, a
+    /// hint replaces the (disabled) Record affordance's silence.
+    private var sourceToggles: some View {
+        VStack(spacing: 10) {
+            Toggle(isOn: $recordMicrophone) {
+                HStack(spacing: 6) {
+                    Image(systemName: "mic.fill")
+                        .font(.callout)
+                        .foregroundStyle(.tint)
+                    Text("Microphone")
+                        .font(.callout)
+                }
+            }
+            .help("Capture your microphone. Turn off to record app audio only (e.g. a meeting or video you're just listening to).")
+            .accessibilityIdentifier("home.record.microphone.toggle")
+
+            Toggle(isOn: $withSystemAudio) {
+                HStack(spacing: 6) {
+                    Image(systemName: "speaker.wave.2.fill")
+                        .font(.callout)
+                        .foregroundStyle(.tint)
+                    Text("App audio")
+                        .font(.callout)
+                }
+            }
+            .help("Capture audio from any app playing on this Mac. Required for meeting / video transcription.")
+            .accessibilityIdentifier("home.record.appaudio.toggle")
+
+            if !canRecord {
+                Text("Turn on at least one source to record.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .toggleStyle(.switch)
         .controlSize(.small)
         .disabled(isRecording)
-        .frame(maxWidth: 460, alignment: .center)
-        .help("Capture audio from any app playing on this Mac alongside your microphone. Required for meeting / video transcription.")
-        .accessibilityIdentifier("home.record.appaudio.toggle")
+        .frame(maxWidth: 280, alignment: .leading)
     }
 
     /// Discrete reminder of the two global dictation hotkeys. Reads live
@@ -185,6 +220,7 @@ private struct HeroRecordButton: View {
     let preparationStatus: String?
     let languageFlag: String
     let languageName: String
+    let microphoneEnabled: Bool
     let withSystemAudio: Bool
     /// True when Live AI mode is on AND a CLI is configured. Drives the
     /// title ("Transcribe and Summarize" vs "Transcribe") and the small
@@ -226,7 +262,9 @@ private struct HeroRecordButton: View {
                             .fill(Color.red)
                             .frame(width: 24, height: 24)
                     } else {
-                        Image(systemName: "mic.fill")
+                        // App-only capture (mic off) shows a speaker glyph
+                        // so the idle button reflects what it'll record.
+                        Image(systemName: microphoneEnabled ? "mic.fill" : "speaker.wave.2.fill")
                             .font(.system(size: 22, weight: .bold))
                             .foregroundStyle(.primary.opacity(0.85))
                         if liveAIEnabled {
@@ -325,7 +363,14 @@ private struct HeroRecordButton: View {
         if isRecording {
             return "Tap to stop"
         }
-        return "\(languageFlag) \(languageName)"
+        let sourceLabel: String
+        switch (microphoneEnabled, withSystemAudio) {
+        case (true, true):   sourceLabel = "Mic + app audio"
+        case (true, false):  sourceLabel = "Microphone"
+        case (false, true):  sourceLabel = "App audio only"
+        case (false, false): sourceLabel = "No source selected"
+        }
+        return "\(languageFlag) \(languageName) · \(sourceLabel)"
     }
 
     private var backgroundColors: [Color] {

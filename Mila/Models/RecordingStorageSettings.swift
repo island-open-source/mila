@@ -33,6 +33,27 @@ import Combine
 @MainActor
 final class RecordingStorageSettings: ObservableObject {
     static let bookmarkKey = "storage.recordingsDirectoryBookmark"
+    static let limitBytesKey = "storage.limitBytes"
+    /// 5 GiB — generous for compressed (m4a) recordings (~20–30 MB/hour),
+    /// so this is roughly 150+ hours before the cap bites.
+    static let defaultLimitBytes: Int64 = 5 * 1024 * 1024 * 1024
+
+    /// Hard cap on the recordings library size. New recordings are
+    /// blocked once usage reaches this; existing/in-progress recordings
+    /// are never touched. Persisted so the choice sticks across launches.
+    @Published var limitBytes: Int64 {
+        didSet {
+            guard limitBytes != oldValue else { return }
+            defaults.set(limitBytes, forKey: Self.limitBytesKey)
+        }
+    }
+
+    /// Whole-GB view of `limitBytes` for the Settings stepper. Uses GiB
+    /// (1024³) to match how Finder/macOS report sizes in this range.
+    var limitGigabytes: Double {
+        get { Double(limitBytes) / 1_073_741_824.0 }
+        set { limitBytes = max(1, Int64((newValue * 1_073_741_824.0).rounded())) }
+    }
 
     /// The currently-active user-selected recordings directory, or nil when
     /// the default is in effect. Published so the Settings UI re-renders
@@ -56,6 +77,11 @@ final class RecordingStorageSettings: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        if let stored = defaults.object(forKey: Self.limitBytesKey) as? Int {
+            self.limitBytes = Int64(stored)
+        } else {
+            self.limitBytes = Self.defaultLimitBytes
+        }
         resolveAndStartAccessing()
     }
 
