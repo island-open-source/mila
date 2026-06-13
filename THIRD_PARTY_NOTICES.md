@@ -37,8 +37,11 @@ Bundled at `Mila/Resources/DiarizationModels/segmentation-3.0/pytorch_model.bin`
 Bundled at `Mila/Resources/DiarizationModels/pyannote-wespeaker-voxceleb-resnet34-LM/pytorch_model.bin`. Loaded as the speaker-embedding model for the diarization pipeline.
 
 - Upstream: https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM
-- Upstream WeSpeaker project: https://github.com/wenet-e2e/wespeaker (Apache-2.0)
-- License: per the upstream model card; the WeSpeaker repository itself is Apache-2.0.
+- Upstream WeSpeaker code project: https://github.com/wenet-e2e/wespeaker (Apache-2.0)
+- License: **CC-BY-4.0** (Creative Commons Attribution 4.0 International), per the
+  HuggingFace model card — it follows the VoxCeleb dataset's terms. Redistribution
+  of the weights is permitted with attribution, which this notice provides.
+- Copyright © the pyannote.audio / WeSpeaker authors and the VoxCeleb dataset creators.
 
 ---
 
