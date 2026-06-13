@@ -1,9 +1,9 @@
-<?xml version="1.0" encoding="utf-8"?>
-<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+<?xml version='1.0' encoding='utf-8'?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
   <channel>
     <title>Mila</title>
     <link>https://island-io.github.io/mila/appcast.xml</link>
     <description>Mila auto-update feed.</description>
     <language>en</language>
-  </channel>
+  <item><title>Version 1.8.8</title><pubDate>Sat, 13 Jun 2026 18:33:08 +0000</pubDate><sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion><enclosure url="https://github.com/island-io/mila/releases/download/v1.8.8/Mila-1.8.8.zip" sparkle:version="45" sparkle:shortVersionString="1.8.8" sparkle:edSignature="gs/sCEkDHqJj2BCCGt6z6a9lIUa+auzbmnsOSpsPDiWRxAvwtArnY4pR0Dz+h267zu0M3EKa1xpmTIT5YWiUAw==" length="140615749" type="application/octet-stream" /></item></channel>
 </rss>
