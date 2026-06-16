@@ -22,12 +22,32 @@ running through `whisper.cpp` (GPU via Metal).
 - Per-segment timestamps, click to seek, copy/share transcript, RTL rendering
   for Hebrew.
 
-## Requirements
+## System requirements
 
-- macOS 14 (Sonoma) or newer.
+To **run** Mila:
+
+- **macOS 14 (Sonoma) or later.**
+- **Apple Silicon (M-series) strongly recommended.** Transcription runs on the
+  Metal GPU (`whisper.cpp`) and speaker diarization on MPS/CPU (pyannote). Intel
+  Macs fall back to CPU and are much slower.
+- **Disk:** ~4.6 GB for the two default Whisper models, downloaded on first
+  launch (ivrit.ai `large-v3` ~3.0 GB + OpenAI `large-v3-turbo` ~1.6 GB). Add
+  ~1 GB more if you enable speaker diarization (bundled Python runtime plus a
+  torch download on first enable).
+- **Memory (approximate):** 16 GB unified memory recommended. 8 GB is workable
+  for plain transcription but tight with diarization. Rough working set: Hebrew
+  `large-v3` ~3.5–4 GB, English `large-v3-turbo` ~1.5–2 GB, speaker diarization
+  adds ~1–2 GB. (RAM figures are approximate guidance, not a hard spec.)
+- **Live (real-time) mode** — running transcription and diarization concurrently
+  in real time is the heaviest path. It's **automatically disabled on MacBook
+  Air–class chips** (they can't keep up in real time) and recommended on M-series
+  Pro/Max, or M2 and newer. Recording plus after-the-fact transcription still
+  works on Air.
+
+To **build** Mila:
+
 - Xcode 15.3 or newer (Command Line Tools alone are not enough).
 - Homebrew (used to install [`xcodegen`](https://github.com/yonaskolb/XcodeGen)).
-- ~4.6 GB of disk for both default ggml models.
 
 ## Build & run
 
