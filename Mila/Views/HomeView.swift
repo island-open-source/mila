@@ -128,6 +128,11 @@ struct HomeView: View {
                     Image(systemName: "mic.fill")
                         .font(.callout)
                         .foregroundStyle(.tint)
+                        // Fixed-width icon column so both rows' labels line up.
+                        // mic.fill and speaker.wave.2.fill have different
+                        // intrinsic widths, which otherwise pushes "App audio"
+                        // right of "Microphone" (and the glyphs don't align).
+                        .frame(width: 22)
                     Text("Microphone")
                         .font(.callout)
                 }
@@ -140,6 +145,7 @@ struct HomeView: View {
                     Image(systemName: "speaker.wave.2.fill")
                         .font(.callout)
                         .foregroundStyle(.tint)
+                        .frame(width: 22)  // see Microphone icon above
                     Text("App audio")
                         .font(.callout)
                 }
