@@ -290,6 +290,25 @@ final class AudioLoopbackUITests: XCTestCase {
         // (the recording.fullText) must be non-empty — i.e. each kept its
         // own live transcript through finalization. Poll: Phase B's
         // rediarize/SRT may still be settling when we first navigate.
+        // A `.accessibilityElement(children: .combine)` row folds the title +
+        // transcript preview + meta into one element. On macOS that combined
+        // text can surface in EITHER `.label` or `.value` depending on the
+        // control type SwiftUI picks — the live-segment check above already
+        // reads both for exactly this reason. Reading only `.label` (the old
+        // code) missed the transcript that's plainly on screen, so the check
+        // tripped even though both recordings finalized correctly.
+        //
+        // We also raise the bar from "label is non-empty" (which the title
+        // alone satisfies) to "the row carries an actual fixture transcript
+        // token" — that's what proves each recording kept its OWN live
+        // transcript through the background finalize tail rather than landing
+        // as an empty shell.
+        let transcriptTokens = ["roadmap", "team", "search", "items", "hello"]
+        func rowText(_ el: XCUIElement) -> String {
+            let lbl = el.label
+            let val = (el.value as? String) ?? ""
+            return (lbl + " " + val).lowercased()
+        }
         var rowCount = 0
         var rowsWithText = 0
         _ = pollUntil(timeout: 60) {
@@ -297,16 +316,15 @@ final class AudioLoopbackUITests: XCTestCase {
                 .matching(NSPredicate(format: "identifier BEGINSWITH 'history.row.'"))
                 .allElementsBoundByIndex
             rowCount = rows.count
-            // A combined a11y element folds the title + preview + meta into
-            // the row's label, so a row that carries its transcript has a
-            // label longer than just its title line. We assert presence of
-            // BOTH rows and that each one's label is non-trivial.
-            rowsWithText = rows.filter { !$0.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
+            rowsWithText = rows.filter { el in
+                let text = rowText(el)
+                return transcriptTokens.contains { text.contains($0) }
+            }.count
             return rowCount >= 2 && rowsWithText >= 2
         }
         snap(app: app, name: "[finalize] all-transcriptions rows=\(rowCount) withText=\(rowsWithText)")
         print("FinalizeE2E: history rows=\(rowCount) withText=\(rowsWithText)")
-        if rowCount < 2 {
+        if rowCount < 2 || rowsWithText < 2 {
             print("FinalizeE2E: ===A11Y TREE AT FAILURE===")
             print(app.debugDescription)
             print("FinalizeE2E: ===A11Y TREE END===")
@@ -322,7 +340,7 @@ final class AudioLoopbackUITests: XCTestCase {
         XCTAssertGreaterThan(segCount2, 0, "Recording #2 captured no live segments")
         XCTAssertGreaterThanOrEqual(
             rowsWithText, 2,
-            "Both history rows must carry a transcript; only \(rowsWithText) of \(rowCount) had non-empty content.")
+            "Both history rows must carry a transcript; only \(rowsWithText) of \(rowCount) carried a fixture transcript token.")
     }
 
     /// Poll `condition` every 0.5s until it returns true or `timeout`

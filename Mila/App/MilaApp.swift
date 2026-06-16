@@ -447,7 +447,18 @@ struct MilaApp: App {
         let sessionRef = session
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("mila-fake-recording-\(UUID().uuidString).wav")
-        await sessionRef.startFakeForTesting(outputURL: outputURL)
+        // Start through QuickActionsController, NOT session directly. Routing
+        // via `startFakeRecordingForTesting` sets `activeJob = .recording` so
+        // `actions.isRecording` flips true — which is what
+        // `ContentView.shouldShowLiveAIRecordingView` keys off to swap Home
+        // for `LiveAIRecordingView`. Calling `session.startFakeForTesting`
+        // alone only moves `session.state` to `.recording` (enough to wire the
+        // live transcriber via `wireLiveAIPipeline`), but leaves `activeJob ==
+        // .none`, so the app stays on Home and the `liveTranscript.*` a11y
+        // elements never mount — the throughput/AGC E2Es then time out waiting
+        // for a `liveTranscript.segment` that exists only in the (background)
+        // pipeline, never in the view tree.
+        await actions.startFakeRecordingForTesting(outputURL: outputURL)
         // Wait for wireLiveAIPipeline to install onLiveSamples (it
         // does so once the .recording case fires). Poll up to ~3s.
         for _ in 0..<60 {
