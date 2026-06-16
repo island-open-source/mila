@@ -37,6 +37,12 @@ bootstrap:
 	}
 
 project: bootstrap
+	@# PythonRuntime is a .gitignored folder reference (see project.yml). It is
+	@# only populated by `make bundle-diarization`. XcodeGen's `optional: true`
+	@# suppresses generation errors but still emits the copy-resources phase, so
+	@# xcodebuild fails on the missing path. Ensure an (empty) dir exists; the app
+	@# detects no bundled python and falls back to system python automatically.
+	@mkdir -p Mila/Resources/PythonRuntime
 	xcodegen generate
 
 open: project
