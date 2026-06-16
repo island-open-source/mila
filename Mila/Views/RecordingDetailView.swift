@@ -130,7 +130,11 @@ struct RecordingDetailView: View {
         let currentLang = RecordingLanguage.fromCode(recording.language)
         let busy = transcription.activeRecordingID == recording.id
                    || transcription.pendingIDs.contains(recording.id)
-        return HStack {
+        // Icon-only buttons with hover tooltips. Labeled buttons here
+        // competed with the title for header width and truncated ("Copy
+        // tra…"); icons keep all four actions visible at any window size.
+        // The Re-transcribe MENU keeps its full text labels in the dropdown.
+        return HStack(spacing: 10) {
             Menu {
                 Button {
                     transcription.enqueue(recording)
@@ -145,29 +149,32 @@ struct RecordingDetailView: View {
                           systemImage: "arrow.triangle.2.circlepath")
                 }
             } label: {
-                Label(recording.status == .completed ? "Re-transcribe" : "Transcribe",
-                      systemImage: "text.badge.checkmark")
+                Image(systemName: "text.badge.checkmark")
             }
+            .fixedSize()
             .disabled(busy)
+            .help(recording.status == .completed ? "Re-transcribe" : "Transcribe")
 
             ShareLink(item: store.audioURL(for: recording)) {
-                Label("Share audio", systemImage: "square.and.arrow.up")
+                Image(systemName: "square.and.arrow.up")
             }
+            .help("Share audio")
 
             Button {
                 copyTranscript()
             } label: {
-                Label("Copy transcript", systemImage: "doc.on.doc")
+                Image(systemName: "doc.on.doc")
             }
             .disabled(recording.fullText.isEmpty)
+            .help("Copy transcript")
 
             Button {
                 exportSRT()
             } label: {
-                Label("Export Subtitles", systemImage: "captions.bubble")
+                Image(systemName: "captions.bubble")
             }
             .disabled(recording.segments.isEmpty)
-            .help("Save subtitles (.srt) for the original video/audio")
+            .help("Export subtitles (.srt) for the original video/audio")
         }
     }
 

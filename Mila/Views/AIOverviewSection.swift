@@ -88,6 +88,21 @@ struct AIOverviewSection: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                Spacer(minLength: 8)
+                if !text.isEmpty {
+                    // One-click copy of the whole summary. The selectable
+                    // text + context menu stay; a visible button just makes
+                    // "grab the summary" obvious (matches the transcript's
+                    // Copy button).
+                    Button {
+                        AIOverviewSection.copyToPasteboard(text)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Copy summary")
+                    .accessibilityIdentifier("detail.summary.copy")
+                }
             }
             // Selectable + right-clickable so users can grab the summary
             // into another doc / chat. `textSelection(.enabled)` gives
@@ -132,9 +147,24 @@ struct AIOverviewSection: View {
     private func actionItemsView(alignment: Alignment,
                                  multiline: TextAlignment) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Label("Action items", systemImage: "checklist")
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(.tint)
+            HStack(spacing: 6) {
+                Label("Action items", systemImage: "checklist")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.tint)
+                Spacer(minLength: 8)
+                // Each row is individually selectable + copyable, but they're
+                // separate Text views so you can't drag-select them all at
+                // once. This copies every item as a bulleted block in one
+                // click — the affordance users were missing for action items.
+                Button {
+                    AIOverviewSection.copyToPasteboard(Self.actionItemsText(items))
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+                .help("Copy action items")
+                .accessibilityIdentifier("detail.actionItems.copy")
+            }
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(items) { item in
                     ActionItemRow(text: item.text,
@@ -143,6 +173,11 @@ struct AIOverviewSection: View {
                 }
             }
         }
+    }
+
+    /// All action items as a bulleted plain-text block, for one-click copy.
+    fileprivate static func actionItemsText(_ items: [ActionItem]) -> String {
+        items.map { "• \($0.text)" }.joined(separator: "\n")
     }
 
     fileprivate static func copyToPasteboard(_ text: String) {
