@@ -80,7 +80,6 @@ final class MeetingPromptCoordinator: ObservableObject {
         guard !actions.isRecording else { return }
         guard settings.enabled else { return }
         guard !settings.isDisabled(forBundleID: app.bundleID) else { return }
-        guard !settings.isSnoozed(forBundleID: app.bundleID) else { return }
 
         showPanel(for: app)
     }
@@ -100,14 +99,11 @@ final class MeetingPromptCoordinator: ObservableObject {
                 }
             },
             onDismiss: { [weak self] in
-                // Suppress re-prompts for this app for the snooze
-                // window. The existing `firedFor` re-arm logic in
-                // MeetingDetector covers "same window stays open";
-                // the snooze covers "window briefly went away and
-                // came back" and "user joined another meeting in
-                // the same app within an hour" — both cases where
-                // the original "Not now" intent still applies.
-                self?.settings.snooze(bundleID: app.bundleID)
+                // "Not now" or the auto-dismiss timeout — just hide. We no
+                // longer snooze: the detector re-arms when the meeting ends
+                // (mic capture stops), so the *next* meeting prompts again,
+                // while its `firedFor` prevents re-prompting within the
+                // current meeting. "Don't show for X" stops prompts entirely.
                 self?.hidePanel()
             },
             onSilenceApp: { [weak self] in

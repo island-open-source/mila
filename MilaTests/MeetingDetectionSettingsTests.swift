@@ -11,49 +11,37 @@ final class MeetingDetectionSettingsTests: XCTestCase {
         return d
     }
 
-    func test_snooze_marks_bundle_id_as_snoozed_until_expiry() {
-        var clock = Date()
-        let s = MeetingDetectionSettings(defaults: freshDefaults(), now: { clock })
-
-        XCTAssertFalse(s.isSnoozed(forBundleID: "us.zoom.xos"))
-        s.snooze(bundleID: "us.zoom.xos")
-        XCTAssertTrue(s.isSnoozed(forBundleID: "us.zoom.xos"))
-
-        clock = clock.addingTimeInterval(MeetingDetectionSettings.snoozeDuration - 1)
-        XCTAssertTrue(s.isSnoozed(forBundleID: "us.zoom.xos"),
-                      "Still inside snooze window")
-
-        clock = clock.addingTimeInterval(2)
-        XCTAssertFalse(s.isSnoozed(forBundleID: "us.zoom.xos"),
-                       "Past snooze deadline — re-arm allowed")
-    }
-
-    func test_snooze_persists_across_re_init_until_expiry() {
-        let defaults = freshDefaults()
-        var clock = Date()
-
-        do {
-            let s = MeetingDetectionSettings(defaults: defaults, now: { clock })
-            s.snooze(bundleID: "us.zoom.xos")
-        }
-
-        // Reload with the same defaults — snooze should still apply.
-        clock = clock.addingTimeInterval(30 * 60)
-        let reloaded = MeetingDetectionSettings(defaults: defaults, now: { clock })
-        XCTAssertTrue(reloaded.isSnoozed(forBundleID: "us.zoom.xos"))
-
-        // Past expiry — re-init drops the stale entry.
-        clock = clock.addingTimeInterval(60 * 60)
-        let afterExpiry = MeetingDetectionSettings(defaults: defaults, now: { clock })
-        XCTAssertFalse(afterExpiry.isSnoozed(forBundleID: "us.zoom.xos"))
-        XCTAssertTrue(afterExpiry.snoozedUntil.isEmpty,
-                      "Expired entries should be GC'd on init")
-    }
-
-    func test_snooze_empty_bundle_id_is_noop() {
+    func test_enabled_defaults_on_for_first_launch() {
         let s = MeetingDetectionSettings(defaults: freshDefaults())
-        s.snooze(bundleID: "")
-        XCTAssertTrue(s.snoozedUntil.isEmpty)
-        XCTAssertFalse(s.isSnoozed(forBundleID: ""))
+        XCTAssertTrue(s.enabled, "Detection should default ON so users discover it")
+    }
+
+    func test_disable_then_reenable_bundle_id() {
+        let s = MeetingDetectionSettings(defaults: freshDefaults())
+        XCTAssertFalse(s.isDisabled(forBundleID: "us.zoom.xos"))
+
+        s.disable(bundleID: "us.zoom.xos")
+        XCTAssertTrue(s.isDisabled(forBundleID: "us.zoom.xos"))
+
+        s.reenable(bundleID: "us.zoom.xos")
+        XCTAssertFalse(s.isDisabled(forBundleID: "us.zoom.xos"))
+    }
+
+    func test_disabled_bundle_ids_persist_across_re_init() {
+        let defaults = freshDefaults()
+        do {
+            let s = MeetingDetectionSettings(defaults: defaults)
+            s.disable(bundleID: "us.zoom.xos")
+        }
+        let reloaded = MeetingDetectionSettings(defaults: defaults)
+        XCTAssertTrue(reloaded.isDisabled(forBundleID: "us.zoom.xos"),
+                      "Silenced apps should survive a relaunch")
+    }
+
+    func test_disable_empty_bundle_id_is_noop() {
+        let s = MeetingDetectionSettings(defaults: freshDefaults())
+        s.disable(bundleID: "")
+        XCTAssertFalse(s.isDisabled(forBundleID: ""))
+        XCTAssertTrue(s.disabledBundleIDs.isEmpty)
     }
 }
