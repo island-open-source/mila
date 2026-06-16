@@ -161,12 +161,12 @@ struct RecordingDetailView: View {
             .help("Share audio")
 
             Button {
-                copyTranscript()
+                copyOverview()
             } label: {
                 Image(systemName: "doc.on.doc")
             }
-            .disabled(recording.fullText.isEmpty)
-            .help("Copy transcript")
+            .disabled(!hasOverviewToCopy)
+            .help("Copy summary + action items")
 
             Button {
                 exportSRT()
@@ -261,35 +261,54 @@ struct RecordingDetailView: View {
                 description: Text("Click \(Image(systemName: "text.badge.checkmark")) Transcribe to start.")
             )
         } else {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 4) {
-                    // Show the speaker column whenever ANY segment has a
-                    // speaker label — that's how the user knows
-                    // diarization actually ran for this recording.
-                    // Dictation segments have nil speakers, so they
-                    // naturally hide the column; a meeting where
-                    // pyannote found only 1 speaker still shows
-                    // "Speaker A" so the user gets feedback that the
-                    // detection ran (vs. silently failing to detect).
-                    let hasSpeakers = recording.segments.contains { $0.speaker != nil }
-                    ForEach(recording.segments) { seg in
-                        SegmentRow(segment: seg,
-                                   isActive: currentTime >= seg.start && currentTime < seg.end,
-                                   showSpeaker: hasSpeakers,
-                                   language: recording.language,
-                                   onTap: { seek(to: seg.start) })
+            VStack(spacing: 0) {
+                // Transcript-area copy button, on the right just below the
+                // AI-overview banner's divider. Mirrors the consolidated
+                // copy model: this grabs the transcript; the header button
+                // grabs the summary + action items.
+                HStack {
+                    Spacer()
+                    Button {
+                        copyTranscript()
+                    } label: {
+                        Image(systemName: "doc.on.doc")
                     }
-                }
-                .padding()
-                .environment(\.layoutDirection, recording.language == "he" ? .rightToLeft : .leftToRight)
-            }
-            .contextMenu {
-                let other = RecordingLanguage.fromCode(recording.language).other
-                Button("Re-transcribe in \(other.flagEmoji) \(other.displayName)") {
-                    retranscribe(in: other)
-                }
-                Button("Copy transcript") { copyTranscript() }
+                    .buttonStyle(.borderless)
                     .disabled(recording.fullText.isEmpty)
+                    .help("Copy transcript")
+                }
+                .padding(.horizontal)
+                .padding(.top, 8)
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        // Show the speaker column whenever ANY segment has a
+                        // speaker label — that's how the user knows
+                        // diarization actually ran for this recording.
+                        // Dictation segments have nil speakers, so they
+                        // naturally hide the column; a meeting where
+                        // pyannote found only 1 speaker still shows
+                        // "Speaker A" so the user gets feedback that the
+                        // detection ran (vs. silently failing to detect).
+                        let hasSpeakers = recording.segments.contains { $0.speaker != nil }
+                        ForEach(recording.segments) { seg in
+                            SegmentRow(segment: seg,
+                                       isActive: currentTime >= seg.start && currentTime < seg.end,
+                                       showSpeaker: hasSpeakers,
+                                       language: recording.language,
+                                       onTap: { seek(to: seg.start) })
+                        }
+                    }
+                    .padding()
+                    .environment(\.layoutDirection, recording.language == "he" ? .rightToLeft : .leftToRight)
+                }
+                .contextMenu {
+                    let other = RecordingLanguage.fromCode(recording.language).other
+                    Button("Re-transcribe in \(other.flagEmoji) \(other.displayName)") {
+                        retranscribe(in: other)
+                    }
+                    Button("Copy transcript") { copyTranscript() }
+                        .disabled(recording.fullText.isEmpty)
+                }
             }
         }
     }
@@ -343,6 +362,36 @@ struct RecordingDetailView: View {
                                                  fallback: recording.fullText)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    /// Whether there's any AI overview content (summary or action items)
+    /// to copy. Gates the header's "Copy summary + action items" button.
+    private var hasOverviewToCopy: Bool {
+        let hasSummary = recording.summary?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty == false
+        let hasItems = !(recording.actionItems ?? []).isEmpty
+        return hasSummary || hasItems
+    }
+
+    /// Copy the AI overview (summary + action items) as plain text: the
+    /// summary first, then — separated by a blank line — the action items
+    /// as `•\u{00A0}…` lines. Only the parts that actually exist are
+    /// included, so a summary-only or items-only recording copies cleanly.
+    private func copyOverview() {
+        var parts: [String] = []
+        if let summary = recording.summary?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !summary.isEmpty {
+            parts.append(summary)
+        }
+        let items = recording.actionItems ?? []
+        if !items.isEmpty {
+            parts.append(items.map { "•\u{00A0}\($0.text)" }.joined(separator: "\n"))
+        }
+        guard !parts.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(parts.joined(separator: "\n\n"), forType: .string)
     }
 }
 
@@ -422,7 +471,12 @@ private struct AIOverviewBanner: View {
             items: items,
             recordingLanguage: recordingLanguage,
             onRegenerateSummary: onRegenerateSummary,
-            isSummarizing: isSummarizing
+            isSummarizing: isSummarizing,
+            // The detail view consolidates copy into two location-based
+            // buttons (Summary+Action-items up top, transcript in the
+            // transcript area), so the per-block header copy buttons are
+            // hidden here. The block's native right-click "Copy" stays.
+            showsBlockCopyButtons: false
         )
         if section.hasContent {
             VStack(spacing: 0) {

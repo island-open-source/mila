@@ -34,6 +34,13 @@ struct AIOverviewSection: View {
     /// `summary` is nil but we still want feedback that work is
     /// happening).
     var isSummarizing: Bool = false
+    /// Whether the per-block "Copy summary" / "Copy action items"
+    /// header buttons are shown. The rename sheet keeps them (default
+    /// `true`); the detail view hides them — it consolidates copy into
+    /// two location-based buttons (Summary+Action-items up top, the
+    /// transcript copy in the transcript area). The block's native
+    /// right-click "Copy" stays in both places either way.
+    var showsBlockCopyButtons: Bool = true
 
     /// True iff there's at least one non-empty piece to show. Callers
     /// can use this to collapse their wrapper (avoiding an empty card
@@ -89,11 +96,13 @@ struct AIOverviewSection: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 8)
-                if !text.isEmpty {
+                if showsBlockCopyButtons, !text.isEmpty {
                     // One-click copy of the whole summary. The selectable
                     // text + context menu stay; a visible button just makes
                     // "grab the summary" obvious (matches the transcript's
-                    // Copy button).
+                    // Copy button). Hidden in the detail view (which copies
+                    // summary + action items from the header button) but
+                    // kept in the rename sheet.
                     Button {
                         AIOverviewSection.copyToPasteboard(text)
                     } label: {
@@ -146,32 +155,48 @@ struct AIOverviewSection: View {
 
     private func actionItemsView(alignment: Alignment,
                                  multiline: TextAlignment) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        // One combined bullet line per item, joined into a SINGLE Text so
+        // the whole list is drag-selectable / copyable at once (the old
+        // per-item Text views couldn't be selected together). Non-breaking
+        // space after the bullet keeps "•" glued to its line on wrap.
+        let combined = items.map { "•\u{00A0}\($0.text)" }.joined(separator: "\n")
+        return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Label("Action items", systemImage: "checklist")
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(.tint)
                 Spacer(minLength: 8)
-                // Each row is individually selectable + copyable, but they're
-                // separate Text views so you can't drag-select them all at
-                // once. This copies every item as a bulleted block in one
-                // click — the affordance users were missing for action items.
-                Button {
-                    AIOverviewSection.copyToPasteboard(Self.actionItemsText(items))
-                } label: {
-                    Image(systemName: "doc.on.doc")
-                }
-                .buttonStyle(.borderless)
-                .help("Copy action items")
-                .accessibilityIdentifier("detail.actionItems.copy")
-            }
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(items) { item in
-                    ActionItemRow(text: item.text,
-                                  alignment: alignment,
-                                  multiline: multiline)
+                if showsBlockCopyButtons {
+                    // Copies every item as a bulleted block in one click.
+                    // Hidden in the detail view (consolidated into the
+                    // header's summary + action-items copy button) but kept
+                    // in the rename sheet.
+                    Button {
+                        AIOverviewSection.copyToPasteboard(Self.actionItemsText(items))
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Copy action items")
+                    .accessibilityIdentifier("detail.actionItems.copy")
                 }
             }
+            // Single selectable block. Drive the block's layout direction
+            // from the section's RTL decision so the bullets land on the
+            // correct (right) side for Hebrew — the per-item HStack used to
+            // put the "•" on the left even in RTL.
+            Text(combined)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: alignment)
+                .multilineTextAlignment(multiline)
+                .textSelection(.enabled)
+                .environment(\.layoutDirection, sectionIsRTL ? .rightToLeft : .leftToRight)
+                .contextMenu {
+                    Button("Copy") {
+                        AIOverviewSection.copyToPasteboard(Self.actionItemsText(items))
+                    }
+                }
         }
     }
 
@@ -184,34 +209,5 @@ struct AIOverviewSection: View {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
-    }
-}
-
-/// Single bullet line for an action item — selectable text plus a
-/// right-click "Copy" affordance. Internal so both the detail view
-/// and the rename sheet share the exact row layout.
-private struct ActionItemRow: View {
-    let text: String
-    let alignment: Alignment
-    let multiline: TextAlignment
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text("•").foregroundStyle(.secondary)
-            // Selectable so the user can drag-select the row's text;
-            // right-click surfaces a one-click "Copy" for the whole
-            // item (the most common ask — paste it into a TODO list).
-            Text(text)
-                .font(.callout)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: alignment)
-                .multilineTextAlignment(multiline)
-                .textSelection(.enabled)
-                .contextMenu {
-                    Button("Copy") {
-                        AIOverviewSection.copyToPasteboard(text)
-                    }
-                }
-        }
     }
 }
