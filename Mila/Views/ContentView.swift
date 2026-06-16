@@ -372,6 +372,9 @@ private struct InputDevicePickerToolbarItem: View {
                     .font(.callout.weight(.medium))
                     .lineLimit(1)
             }
+            // Breathing room so the icon/label aren't flush against the
+            // borderless menu's rounded capsule edges.
+            .padding(.horizontal, 8)
         }
         .menuStyle(.borderlessButton)
         .help("Microphone used for new recordings and dictation")
@@ -431,6 +434,10 @@ private struct LanguagePickerToolbarItem: View {
                 Text(languageSettings.current.displayName)
                     .font(.callout.weight(.medium))
             }
+            // Breathing room so the flag/label aren't flush against the
+            // borderless menu's rounded capsule edges (matches the input
+            // device picker next to it).
+            .padding(.horizontal, 8)
         }
         .menuStyle(.borderlessButton)
         .help("Language used for new voice memos and app-audio recordings")
