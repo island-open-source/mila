@@ -22,8 +22,16 @@ final class MeetingPromptCoordinator: ObservableObject {
     private let detector: MeetingDetector
     private let settings: MeetingDetectionSettings
     private let actions: QuickActionsController
-    private var cancellable: AnyCancellable?
+    private var startCancellable: AnyCancellable?
+    private var endCancellable: AnyCancellable?
+    private var recordingStateCancellable: AnyCancellable?
     private var window: NSPanel?
+    /// True only while the currently-presented panel is the *stop* prompt.
+    /// Used to auto-dismiss that prompt if recording ends through any other
+    /// path (Record button, hotkey, sleep) during its countdown — a dead
+    /// "Stop recording" button is worse than no prompt. The start prompt is
+    /// untouched by this.
+    private var stopPromptShowing = false
 
     init(detector: MeetingDetector,
          settings: MeetingDetectionSettings,
@@ -33,11 +41,62 @@ final class MeetingPromptCoordinator: ObservableObject {
         self.actions = actions
     }
 
+    /// Pure decision for whether the *stop* prompt should appear when a
+    /// meeting goes inactive. Extracted so it's unit-testable without a
+    /// real Zoom: the inputs are exactly the three things that gate the
+    /// prompt. NOT gated on how the recording started — a manual record and
+    /// an auto-prompt record are treated identically.
+    ///
+    /// - Parameters:
+    ///   - detectionEnabled: the user's `MeetingDetectionSettings.enabled`
+    ///     toggle — the whole feature is off when this is false.
+    ///   - appSilenced: whether the user chose "don't show this for X" for
+    ///     the app whose meeting just ended.
+    ///   - isRecording: whether Mila is actively recording right now.
+    ///   - promptAlreadyShowing: whether a prompt panel is already up (we
+    ///     never stack a second one).
+    static func shouldShowStopPrompt(detectionEnabled: Bool,
+                                     appSilenced: Bool,
+                                     isRecording: Bool,
+                                     promptAlreadyShowing: Bool) -> Bool {
+        guard detectionEnabled else { return false }
+        guard !appSilenced else { return false }
+        guard isRecording else { return false }
+        guard !promptAlreadyShowing else { return false }
+        return true
+    }
+
+    /// Pure decision for whether a *showing* stop prompt should now
+    /// auto-dismiss. The stop prompt only makes sense while a recording is
+    /// live — its sole action is "stop recording." If recording ends through
+    /// any other path during the prompt's countdown (Record button, hotkey,
+    /// system sleep, etc.), the button becomes a dead no-op, so we tear the
+    /// prompt down. Only applies to the stop prompt; the start prompt is left
+    /// alone. Extracted so it's unit-testable without a real Zoom / panel.
+    static func shouldDismissStopPrompt(stopPromptShowing: Bool,
+                                        isRecording: Bool) -> Bool {
+        stopPromptShowing && !isRecording
+    }
+
     func start() {
-        cancellable = detector.meetingStarted
+        startCancellable = detector.meetingStarted
             .receive(on: DispatchQueue.main)
             .sink { [weak self] app in
                 self?.handleMeetingStart(app: app)
+            }
+        endCancellable = detector.meetingEnded
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] app in
+                self?.handleMeetingEnd(app: app)
+            }
+        // Auto-dismiss a showing stop prompt the moment recording leaves the
+        // active state through any path — `activeJob` is what backs
+        // `isRecording`, so observing it covers the Record button, hotkeys,
+        // and system-sleep stops alike.
+        recordingStateCancellable = actions.$activeJob
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.dismissStopPromptIfRecordingEnded()
             }
         if settings.enabled {
             detector.start()
@@ -45,8 +104,12 @@ final class MeetingPromptCoordinator: ObservableObject {
     }
 
     func stop() {
-        cancellable?.cancel()
-        cancellable = nil
+        startCancellable?.cancel()
+        startCancellable = nil
+        endCancellable?.cancel()
+        endCancellable = nil
+        recordingStateCancellable?.cancel()
+        recordingStateCancellable = nil
         detector.stop()
         hidePanel()
     }
@@ -81,13 +144,39 @@ final class MeetingPromptCoordinator: ObservableObject {
         guard settings.enabled else { return }
         guard !settings.isDisabled(forBundleID: app.bundleID) else { return }
 
-        showPanel(for: app)
+        showStartPanel(for: app)
     }
 
-    private func showPanel(for app: MeetingDetector.App) {
+    /// The inverse of `handleMeetingStart`: a meeting we were tracking went
+    /// inactive. If Mila is recording (regardless of how that recording was
+    /// started) and the feature is enabled, offer to stop.
+    private func handleMeetingEnd(app: MeetingDetector.App) {
+        guard Self.shouldShowStopPrompt(
+            detectionEnabled: settings.enabled,
+            appSilenced: settings.isDisabled(forBundleID: app.bundleID),
+            isRecording: actions.isRecording,
+            promptAlreadyShowing: window != nil
+        ) else { return }
+
+        showStopPanel(for: app)
+    }
+
+    /// Fires on every `actions.activeJob` change. If the stop prompt is up
+    /// and recording is no longer active, dismiss it — the "Stop recording"
+    /// button would otherwise be a dead no-op (recording already ended).
+    private func dismissStopPromptIfRecordingEnded() {
+        guard Self.shouldDismissStopPrompt(
+            stopPromptShowing: stopPromptShowing,
+            isRecording: actions.isRecording
+        ) else { return }
+        hidePanel()
+    }
+
+    private func showStartPanel(for app: MeetingDetector.App) {
         let view = MeetingPromptView(
             app: app,
-            onStart: { [weak self] in
+            kind: .start,
+            onPrimary: { [weak self] in
                 self?.hidePanel()
                 Task { @MainActor [weak self] in
                     // Auto-prompt always captures system audio — the
@@ -111,7 +200,36 @@ final class MeetingPromptCoordinator: ObservableObject {
                 self?.hidePanel()
             }
         )
+        presentPanel(hosting: view)
+    }
 
+    /// Mirror of `showStartPanel` for the end-of-meeting case. The primary
+    /// action stops the active recording; "Keep recording" just dismisses.
+    private func showStopPanel(for app: MeetingDetector.App) {
+        let view = MeetingPromptView(
+            app: app,
+            kind: .stop,
+            onPrimary: { [weak self] in
+                self?.hidePanel()
+                Task { @MainActor [weak self] in
+                    await self?.actions.stopRecording()
+                }
+            },
+            onDismiss: { [weak self] in
+                // "Keep recording" or the auto-dismiss timeout — leave the
+                // recording running and just hide the panel.
+                self?.hidePanel()
+            },
+            onSilenceApp: { [weak self] in
+                self?.settings.disable(bundleID: app.bundleID)
+                self?.hidePanel()
+            }
+        )
+        stopPromptShowing = true
+        presentPanel(hosting: view)
+    }
+
+    private func presentPanel(hosting view: MeetingPromptView) {
         let panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: NSSize(width: 360, height: 168)),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -138,6 +256,7 @@ final class MeetingPromptCoordinator: ObservableObject {
     }
 
     private func hidePanel() {
+        stopPromptShowing = false
         guard let panel = window else { return }
         self.window = nil
         NSAnimationContext.runAnimationGroup({ ctx in
@@ -162,8 +281,17 @@ final class MeetingPromptCoordinator: ObservableObject {
 /// with the progress bar across the bottom acting as the countdown.
 /// Hovering pauses the bar (and freezes the auto-dismiss timer).
 private struct MeetingPromptView: View {
+    /// Which prompt this is — start a recording (meeting detected) or stop
+    /// one (meeting ended). Drives all the copy, the primary button style,
+    /// and the accessibility identifiers so a single view body serves both.
+    enum Kind {
+        case start
+        case stop
+    }
+
     let app: MeetingDetector.App
-    let onStart: () -> Void
+    let kind: Kind
+    let onPrimary: () -> Void
     let onDismiss: () -> Void
     let onSilenceApp: () -> Void
 
@@ -215,7 +343,44 @@ private struct MeetingPromptView: View {
         .onHover { hovering = $0 }
         .onReceive(timer) { _ in tick() }
         .onAppear { lastTick = Date() }
-        .accessibilityIdentifier("meetingPrompt.\(app.bundleID)")
+        .accessibilityIdentifier("\(identifierPrefix).\(app.bundleID)")
+    }
+
+    /// Accessibility-identifier prefix, distinct per kind so UI tests can
+    /// target the start prompt and the stop prompt independently.
+    private var identifierPrefix: String {
+        switch kind {
+        case .start: return "meetingPrompt"
+        case .stop:  return "meetingStopPrompt"
+        }
+    }
+
+    private var titleText: String {
+        switch kind {
+        case .start: return "\(app.displayName) meeting detected"
+        case .stop:  return "\(app.displayName) meeting ended"
+        }
+    }
+
+    private var subtitleText: String {
+        switch kind {
+        case .start: return "Want Mila to transcribe this call?"
+        case .stop:  return "Stop recording now?"
+        }
+    }
+
+    private var primaryButtonText: String {
+        switch kind {
+        case .start: return "Start transcribing"
+        case .stop:  return "Stop recording"
+        }
+    }
+
+    private var dismissButtonText: String {
+        switch kind {
+        case .start: return "Not now"
+        case .stop:  return "Keep recording"
+        }
     }
 
     /// Brighter card fill — `regularMaterial` skews dark on macOS in
@@ -244,7 +409,7 @@ private struct MeetingPromptView: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text("\(app.displayName) meeting detected")
+                    Text(titleText)
                         .font(.callout.weight(.semibold))
                     Spacer()
                     Button {
@@ -261,30 +426,30 @@ private struct MeetingPromptView: View {
                     }
                     .buttonStyle(.plain)
                     .help("More options")
-                    .accessibilityIdentifier("meetingPrompt.chevron")
+                    .accessibilityIdentifier("\(identifierPrefix).chevron")
                 }
 
-                Text("Want Mila to transcribe this call?")
+                Text(subtitleText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 HStack(spacing: 8) {
-                    Button(action: triggerStart) {
-                        Text("Start transcribing")
+                    Button(action: triggerPrimary) {
+                        Text(primaryButtonText)
                             .font(.callout.weight(.medium))
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                    .accessibilityIdentifier("meetingPrompt.start")
+                    .accessibilityIdentifier("\(identifierPrefix).primary")
 
                     Button(action: triggerDismiss) {
-                        Text("Not now")
+                        Text(dismissButtonText)
                             .font(.callout)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .accessibilityIdentifier("meetingPrompt.dismiss")
+                    .accessibilityIdentifier("\(identifierPrefix).dismiss")
                 }
                 .padding(.top, 4)
             }
@@ -303,7 +468,7 @@ private struct MeetingPromptView: View {
                 .foregroundStyle(.primary)
             }
             .buttonStyle(.plain)
-            .accessibilityIdentifier("meetingPrompt.silence")
+            .accessibilityIdentifier("\(identifierPrefix).silence")
 
             Text("You can re-enable this in Settings → Meetings.")
                 .font(.caption2)
@@ -345,10 +510,10 @@ private struct MeetingPromptView: View {
         }
     }
 
-    private func triggerStart() {
+    private func triggerPrimary() {
         guard !dismissed else { return }
         dismissed = true
-        onStart()
+        onPrimary()
     }
 
     private func triggerDismiss() {

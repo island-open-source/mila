@@ -793,9 +793,9 @@ private struct MeetingsSettingsTab: View {
                 header
                 Toggle(isOn: $settings.enabled) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Offer to transcribe when a meeting starts")
+                        Text("Prompt when a meeting starts or ends")
                             .font(.body)
-                        Text("Mila shows a small prompt in the top-right when it sees you join a meeting in a supported app.")
+                        Text("Mila shows a small prompt in the top-right when it sees you join a meeting in a supported app — and, while it's recording, when that meeting ends, it offers to stop.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)

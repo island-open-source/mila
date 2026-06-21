@@ -64,12 +64,40 @@ final class MeetingDetector: ObservableObject {
     /// meeting, so leaving and rejoining a call surfaces a fresh prompt.
     let meetingStarted = PassthroughSubject<App, Never>()
 
+    /// Fired exactly once when a previously-active meeting goes inactive —
+    /// the inverse of `meetingStarted`. Debounced (see
+    /// `endConfirmationPolls`) so a momentary mic drop by Zoom doesn't
+    /// masquerade as the meeting ending. The coordinator uses this to ask
+    /// whether to STOP an in-flight recording.
+    let meetingEnded = PassthroughSubject<App, Never>()
+
+    /// How many consecutive polls a previously-active meeting must read as
+    /// inactive before we treat it as genuinely ended. At a 3 s poll this
+    /// is ~6 s of sustained silence — long enough to ride out Zoom briefly
+    /// releasing the mic (mute/unmute, device switch) without a false
+    /// "meeting ended". Internal so tests can drive the transition with a
+    /// known threshold.
+    let endConfirmationPolls: Int
+
     private var pollTask: Task<Void, Never>?
     /// Canonical bundle IDs we've already prompted for in the current run
     /// of a meeting. Cleared (re-armed) when the meeting ends.
     private var firedFor: Set<String> = []
+    /// Canonical bundle IDs we've seen in a meeting AND not yet fired a
+    /// `meetingEnded` for. A bundle ID stays here from the first active
+    /// poll until the end transition is confirmed and emitted, so we emit
+    /// `meetingEnded` exactly once per meeting.
+    private var endArmed: Set<String> = []
+    /// Per-app count of consecutive polls observed inactive while still
+    /// `endArmed`. Reset to zero on any active poll; once it reaches
+    /// `endConfirmationPolls` we emit `meetingEnded` and disarm.
+    private var inactiveStreak: [String: Int] = [:]
     /// Logged once so we know which detection path is live in the field.
     private var loggedMode = false
+
+    init(endConfirmationPolls: Int = 2) {
+        self.endConfirmationPolls = max(1, endConfirmationPolls)
+    }
 
     func start() {
         guard pollTask == nil else { return }
@@ -91,13 +119,13 @@ final class MeetingDetector: ObservableObject {
         pollTask?.cancel()
         pollTask = nil
         firedFor.removeAll()
+        endArmed.removeAll()
+        inactiveStreak.removeAll()
     }
 
     /// Exposed for tests and one-shot manual triggers (e.g. a future
     /// "Test the meeting prompt" button in Settings).
     func pollOnce() {
-        var activeMeetings: Set<String> = []
-
         // Primary path: which bundle IDs are capturing the mic right now?
         // nil ⇒ the per-process audio API isn't available (older macOS).
         let capturing = bundleIDsCapturingMicInput()
@@ -106,6 +134,7 @@ final class MeetingDetector: ObservableObject {
             Self.log.notice("detection mode: \(capturing == nil ? "window-title (fallback)" : "mic-capture", privacy: .public)")
         }
 
+        var activeMeetings: Set<String> = []
         for app in Self.supportedApps {
             let inMeeting: Bool
             if let capturing {
@@ -115,24 +144,66 @@ final class MeetingDetector: ObservableObject {
             } else {
                 inMeeting = isRunning(app) && hasMeetingWindow(for: app)
             }
+            if inMeeting { activeMeetings.insert(app.bundleID) }
+        }
+        processActiveMeetings(activeMeetings)
+    }
 
-            if inMeeting {
-                activeMeetings.insert(app.bundleID)
-                if !firedFor.contains(app.bundleID) {
-                    firedFor.insert(app.bundleID)
-                    Self.log.notice("meeting detected: \(app.displayName, privacy: .public) → firing prompt")
-                    meetingStarted.send(app)
-                }
+    /// Test seam: drive the state machine directly with a set of "in a
+    /// meeting" bundle IDs, bypassing Core Audio. Lets unit tests exercise
+    /// the start/end transitions (and the end-debounce) deterministically
+    /// without a real Zoom or any audio hardware.
+    func simulatePollForTesting(activeBundleIDs: Set<String>) {
+        processActiveMeetings(activeBundleIDs)
+    }
+
+    /// The pure transition core shared by the live poll and the test seam:
+    /// given the set of bundle IDs currently in a meeting, fire
+    /// `meetingStarted` on the rising edge and `meetingEnded` on a
+    /// debounced falling edge.
+    private func processActiveMeetings(_ activeMeetings: Set<String>) {
+        for app in Self.supportedApps where activeMeetings.contains(app.bundleID) {
+            // A meeting is (still) live — arm the end-detector and
+            // clear any in-progress inactivity streak so a brief mic
+            // drop that already recovered doesn't count toward "ended".
+            endArmed.insert(app.bundleID)
+            inactiveStreak[app.bundleID] = 0
+            if !firedFor.contains(app.bundleID) {
+                firedFor.insert(app.bundleID)
+                Self.log.notice("meeting detected: \(app.displayName, privacy: .public) → firing prompt")
+                meetingStarted.send(app)
             }
         }
 
-        // Re-arm any app that left its meeting — leaving a call and
-        // joining a new one should produce a fresh prompt.
+        // Re-arm the START prompt for any app that left its meeting —
+        // leaving a call and joining a new one should produce a fresh
+        // prompt. This is immediate (no debounce): re-arming early is
+        // harmless because the next *start* still requires a fresh active
+        // poll.
         let ended = firedFor.subtracting(activeMeetings)
         if !ended.isEmpty {
             Self.log.notice("meeting ended, re-armed: \(ended, privacy: .public)")
         }
         firedFor = firedFor.intersection(activeMeetings)
+
+        // Drive the debounced active→inactive transition that powers the
+        // STOP prompt. Unlike the re-arm above, this only fires after the
+        // meeting has read inactive for `endConfirmationPolls` consecutive
+        // polls, so a momentary Zoom mic release doesn't look like the call
+        // ending.
+        for bundleID in endArmed where !activeMeetings.contains(bundleID) {
+            let streak = (inactiveStreak[bundleID] ?? 0) + 1
+            if streak >= endConfirmationPolls {
+                inactiveStreak[bundleID] = nil
+                endArmed.remove(bundleID)
+                if let app = Self.supportedApps.first(where: { $0.bundleID == bundleID }) {
+                    Self.log.notice("meeting ended (confirmed): \(app.displayName, privacy: .public) → firing stop prompt")
+                    meetingEnded.send(app)
+                }
+            } else {
+                inactiveStreak[bundleID] = streak
+            }
+        }
     }
 
     private func isRunning(_ app: App) -> Bool {

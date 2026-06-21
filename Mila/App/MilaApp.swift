@@ -310,6 +310,7 @@ struct MilaApp: App {
                 .task { maybeRelocateBundle() }
                 .task { enqueueRecoveredRecordings() }
                 .task { startMeetingDetectionIfNeeded() }
+                .task { await simulateMeetingEndedIfRequested() }
                 .task { await wireLiveAIPipeline() }
                 .task { await injectFixtureWavIfRequested() }
                 .task { await runFinalizeRegressionIfRequested() }
@@ -414,6 +415,32 @@ struct MilaApp: App {
     private func startMeetingDetectionIfNeeded() {
         meetingPrompt.start()
         meetingPrompt.bindEnabledChanges()
+    }
+
+    /// CI/UI-test seam for the end-of-meeting STOP prompt. With
+    /// `--ui-test-simulate-meeting-ended` present we start a fake
+    /// recording (no AVAudioEngine / no real Zoom) and then fire the
+    /// detector's `meetingEnded` subject for Zoom, exercising the exact
+    /// production path: `MeetingPromptCoordinator.handleMeetingEnd` →
+    /// `showStopPanel`. The UI test then asserts the stop prompt
+    /// (`meetingStopPrompt.*`) appears. Mirrors the
+    /// `--ui-test-inject-fixture-wav=` injection style used elsewhere.
+    @MainActor
+    private func simulateMeetingEndedIfRequested() async {
+        guard CommandLine.arguments.contains("--ui-test-simulate-meeting-ended") else { return }
+        // Let `startMeetingDetectionIfNeeded` mount the coordinator's
+        // `meetingEnded` subscription before we fire the event.
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mila-fake-recording-\(UUID().uuidString).wav")
+        await actions.startFakeRecordingForTesting(outputURL: outputURL)
+        // Give the fake recording a moment to flip `actions.isRecording`.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        if let zoom = MeetingDetector.supportedApps.first {
+            os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+                .log("simulate-meeting-ended: firing meetingEnded for \(zoom.displayName, privacy: .public)")
+            meetingDetector.meetingEnded.send(zoom)
+        }
     }
 
     /// Wire the Live AI pipeline. Observes `RecordingSession.state` and
