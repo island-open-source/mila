@@ -96,6 +96,27 @@ enum LLMSession: Equatable {
     case resume(UUID)
 }
 
+/// What content the "Send to <LLM>" sheet ships alongside the prompt.
+///
+/// `.transcript` is the long-standing default — it sends the full transcript
+/// (with the Live-AI summary prepended when one exists). `.summaryAndActionItems`
+/// is the lighter alternative: it sends the rolling summary plus the recording's
+/// action items *instead of* the raw transcript, which is what most users want
+/// when they just need the takeaways rather than the verbatim text.
+enum LLMSendContent: String, CaseIterable, Identifiable, Codable {
+    case transcript
+    case summaryAndActionItems
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .transcript:           return "Transcript"
+        case .summaryAndActionItems: return "Summary & action items"
+        }
+    }
+}
+
 /// User-configurable prompts + tool selection for the LLM integration. The
 /// "name" prompt is sent right after a recording transcribes so the user can
 /// accept / reject a suggested title; the "action" prompt is what the user
@@ -136,6 +157,13 @@ final class LLMSettings: ObservableObject {
         didSet { defaults.set(postActionPrompt, forKey: Keys.actionPrompt) }
     }
 
+    /// Default for what the "Send to <LLM>" sheet ships: the full transcript
+    /// (current behaviour) or the summary + action items instead. Surfaced as
+    /// a global default in Settings and seeds the per-send picker in the sheet.
+    @Published var sendContent: LLMSendContent {
+        didSet { defaults.set(sendContent.rawValue, forKey: Keys.sendContent) }
+    }
+
     /// Convenience the UI uses to decide whether to surface the rename /
     /// run-action buttons at all.
     var isConfigured: Bool { tool != .none }
@@ -151,6 +179,8 @@ final class LLMSettings: ObservableObject {
         self.namePrompt = defaults.string(forKey: Keys.namePrompt) ?? Self.defaultNamePrompt
         self.postActionEnabled = defaults.bool(forKey: Keys.actionEnabled)
         self.postActionPrompt = defaults.string(forKey: Keys.actionPrompt) ?? Self.defaultActionPrompt
+        let rawSendContent = defaults.string(forKey: Keys.sendContent) ?? LLMSendContent.transcript.rawValue
+        self.sendContent = LLMSendContent(rawValue: rawSendContent) ?? .transcript
     }
 
     /// Default name prompt is deliberately *tool-free*. The previous default
@@ -183,5 +213,6 @@ final class LLMSettings: ObservableObject {
         static let namePrompt = "llm.name.prompt"
         static let actionEnabled = "llm.action.enabled"
         static let actionPrompt = "llm.action.prompt"
+        static let sendContent = "llm.sendContent"
     }
 }

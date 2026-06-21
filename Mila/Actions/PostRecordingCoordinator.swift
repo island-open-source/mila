@@ -137,6 +137,7 @@ final class PostRecordingCoordinator: ObservableObject {
                    prompt: String,
                    transcript: String,
                    summary: String,
+                   actionItems: [String] = [],
                    executableOverride: String?) {
         guard tool != .none else { return }
         let toolName = tool.displayName
@@ -154,8 +155,17 @@ final class PostRecordingCoordinator: ObservableObject {
             guard let self else { return }
             // Resolve the transcript: use the click-time snapshot if it
             // already has text, otherwise wait for transcription to finish.
+            //
+            // Exception: the "Summary & action items" send mode deliberately
+            // ships an EMPTY transcript (the summary + items carry the
+            // payload). In that case we must not stall waiting for — and then
+            // injecting — the transcript the caller chose to omit. Only wait
+            // when there's genuinely nothing to send yet.
+            let hasSummary = !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let hasItems = actionItems.contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            let hasOtherPayload = hasSummary || hasItems
             let resolved: String
-            if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !hasOtherPayload {
                 guard let waited = await self.awaitTranscript(for: recordingID,
                                                               timeout: timeout) else {
                     if Task.isCancelled { return }
@@ -173,6 +183,7 @@ final class PostRecordingCoordinator: ObservableObject {
                     prompt: prompt,
                     transcript: resolved,
                     summary: summary,
+                    actionItems: actionItems,
                     executablePathOverride: executableOverride,
                     timeout: LLMRunner.defaultTimeout
                 )

@@ -178,6 +178,90 @@ final class LLMRunnerTests: XCTestCase {
                        "Make a doc.\n\n---\nSummary:\nMigration is done.")
     }
 
+    // MARK: - Action items wire format
+
+    /// Summary + action items with NO transcript (the "Summary & action
+    /// items" send mode when Live AI was on). The wire format must include a
+    /// `Summary:` section and an `Action items:` section, and must NOT include
+    /// a `Full transcript:` / `Transcript:` section.
+    func test_composed_prompt_with_summary_and_action_items_no_transcript() {
+        let composed = LLMRunner.composedPrompt(
+            "Email the team.",
+            transcript: "",
+            summary: "We finalised the Q3 roadmap.",
+            actionItems: ["Uri opens the migration PR", "Dana reviews by Friday"])
+        XCTAssertEqual(composed, """
+            Email the team.
+
+            ---
+            Summary:
+            We finalised the Q3 roadmap.
+
+            Action items:
+            - Uri opens the migration PR
+            - Dana reviews by Friday
+            """)
+        XCTAssertFalse(composed.contains("Full transcript:"))
+        XCTAssertFalse(composed.contains("Transcript:"))
+    }
+
+    /// Action items format as `- ` bullet lines, one per item, with empty /
+    /// whitespace-only items dropped.
+    func test_composed_prompt_action_items_format_as_dash_lines() {
+        let composed = LLMRunner.composedPrompt(
+            "Do it.",
+            transcript: "",
+            summary: "Gist.",
+            actionItems: ["First", "   ", "Second"])
+        XCTAssertTrue(composed.contains("Action items:\n- First\n- Second"),
+                      "items not rendered as dash lines / empty not dropped: \(composed)")
+    }
+
+    /// All three sections present → order is Summary, Action items, Full
+    /// transcript.
+    func test_composed_prompt_orders_summary_then_items_then_transcript() {
+        let composed = LLMRunner.composedPrompt(
+            "Go.",
+            transcript: "Raw words.",
+            summary: "Gist.",
+            actionItems: ["Ship it"])
+        XCTAssertEqual(composed, """
+            Go.
+
+            ---
+            Summary:
+            Gist.
+
+            Action items:
+            - Ship it
+
+            Full transcript:
+            Raw words.
+            """)
+    }
+
+    /// Back-compat: transcript + summary, no action items, is byte-for-byte
+    /// identical to today's wire format.
+    func test_composed_prompt_transcript_and_summary_unchanged_without_items() {
+        let composed = LLMRunner.composedPrompt(
+            "Make a tweet from this.",
+            transcript: "Hello world.",
+            summary: "We discussed the new schema.",
+            actionItems: [])
+        XCTAssertEqual(composed,
+                       "Make a tweet from this.\n\n---\nSummary:\nWe discussed the new schema.\n\nFull transcript:\nHello world.")
+    }
+
+    /// Everything empty (no transcript, no summary, no items) → prompt only.
+    func test_composed_prompt_all_empty_is_prompt_only() {
+        let composed = LLMRunner.composedPrompt(
+            "Just answer.",
+            transcript: "   ",
+            summary: "",
+            actionItems: ["  "])
+        XCTAssertEqual(composed, "Just answer.")
+    }
+
     func test_timeout_fires_when_process_exceeds_limit() async {
         // Script ignores its args and sleeps 5s. Runner times out at 1s.
         // The contract verified here is "the timeout error fires" — wall

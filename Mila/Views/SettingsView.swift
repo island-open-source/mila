@@ -479,6 +479,8 @@ private struct LLMSettingsTab: View {
                 namePromptSection
                 Divider()
                 actionPromptSection
+                Divider()
+                sendContentSection
             }
             .padding(.vertical, 4)
         }
@@ -550,6 +552,21 @@ private struct LLMSettingsTab: View {
             ExamplesView(title: "Examples", items: LLMSettings.actionExamples) {
                 settings.postActionPrompt = $0
             }
+        }
+    }
+
+    private var sendContentSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("Send to LLM", selection: $settings.sendContent) {
+                ForEach(LLMSendContent.allCases) { content in
+                    Text(content.displayName).tag(content)
+                }
+            }
+            .pickerStyle(.segmented)
+            Text("Transcript by default; or send the summary + action items instead.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

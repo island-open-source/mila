@@ -65,20 +65,44 @@ enum LLMRunner {
     /// transcript. Empty / whitespace-only `summary` is omitted entirely
     /// (we don't want "Summary: (empty)" confusing the model when Live AI
     /// wasn't configured for this recording).
+    ///
+    /// `actionItems`, when non-empty, renders an `Action items:` section
+    /// (one `- item` per line) between the summary and the transcript. Empty
+    /// items are dropped, and a fully-empty list omits the section entirely —
+    /// same collapse-empties philosophy as `summary`. Section order when all
+    /// three are present is: Summary, Action items, Full transcript.
     static func composedPrompt(_ userPrompt: String,
                                transcript: String,
-                               summary: String = "") -> String {
+                               summary: String = "",
+                               actionItems: [String] = []) -> String {
         let prompt = userPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let body = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         let gist = summary.trimmingCharacters(in: .whitespacesAndNewlines)
-        if body.isEmpty && gist.isEmpty { return prompt }
-        if gist.isEmpty {
-            return "\(prompt)\n\n---\nTranscript:\n\(body)"
+        let items = actionItems
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        // Build the non-empty sections in display order, then join. This
+        // keeps the prompt-only / transcript-only / summary-only shapes the
+        // old code produced while letting Action items slot in cleanly.
+        var sections: [String] = []
+        if !gist.isEmpty {
+            sections.append("Summary:\n\(gist)")
         }
-        if body.isEmpty {
-            return "\(prompt)\n\n---\nSummary:\n\(gist)"
+        if !items.isEmpty {
+            let rendered = items.map { "- \($0)" }.joined(separator: "\n")
+            sections.append("Action items:\n\(rendered)")
         }
-        return "\(prompt)\n\n---\nSummary:\n\(gist)\n\nFull transcript:\n\(body)"
+        if !body.isEmpty {
+            // Label the transcript "Transcript" when it stands alone, but
+            // "Full transcript" once a summary/action-items gist precedes it —
+            // the qualifier signals to the model that the gist above is the
+            // condensed version of what follows.
+            let label = (gist.isEmpty && items.isEmpty) ? "Transcript" : "Full transcript"
+            sections.append("\(label):\n\(body)")
+        }
+        if sections.isEmpty { return prompt }
+        return "\(prompt)\n\n---\n" + sections.joined(separator: "\n\n")
     }
 
     /// Run `tool` with `prompt` + `transcript`. Returns stdout, trimmed.
@@ -93,12 +117,17 @@ enum LLMRunner {
     /// configured) — the wire format collapses to the old transcript-only
     /// shape in that case.
     ///
+    /// `actionItems` (optional) renders an `Action items:` section between the
+    /// summary and the transcript. Used by the "Summary & action items" send
+    /// mode. Empty by default so existing callers keep the prior wire format.
+    ///
     /// `timeout` defaults to 5 minutes. Pass a smaller value for foreground
     /// callers that block UI (e.g. the Suggest button).
     static func run(tool: LLMTool,
                     prompt: String,
                     transcript: String,
                     summary: String = "",
+                    actionItems: [String] = [],
                     executablePathOverride: String?,
                     model: String? = nil,
                     session: LLMSession = .none,
@@ -107,7 +136,7 @@ enum LLMRunner {
 
         let executable = try resolveExecutable(tool: tool,
                                                override: executablePathOverride)
-        let fullPrompt = composedPrompt(prompt, transcript: transcript, summary: summary)
+        let fullPrompt = composedPrompt(prompt, transcript: transcript, summary: summary, actionItems: actionItems)
         let modelTag = (model?.isEmpty ?? true) ? "(default)" : (model ?? "")
         let sessionTag: String = {
             switch session {
