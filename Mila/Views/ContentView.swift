@@ -12,6 +12,7 @@ struct ContentView: View {
     @EnvironmentObject private var postRecording: PostRecordingCoordinator
     @EnvironmentObject private var llmSettings: LLMSettings
     @EnvironmentObject private var liveAISettings: LiveAISettings
+    @EnvironmentObject private var updater: UpdaterViewModel
 
     @State private var selection: SidebarSelection? = .home
     @State private var search: String = ""
@@ -173,6 +174,21 @@ struct ContentView: View {
             set: { newValue in if newValue == nil { postRecording.pending = nil } }
         )) { recording in
             RenameRecordingSheet(initialRecording: recording)
+        }
+        // Pre-update enticement: when Sparkle's scheduled poll finds a newer
+        // version, show the custom "What's New" popup instead of Sparkle's
+        // stock window (the standard window still runs for an explicit
+        // "Check for Updates…"). "Update Now" hands back to Sparkle's install
+        // flow; "Later" / dismiss records the version as seen.
+        .sheet(item: Binding(
+            get: { updater.availableUpdate },
+            set: { newValue in if newValue == nil { updater.dismissUpdate() } }
+        )) { update in
+            WhatsNewPopup(
+                update: update,
+                onUpdateNow: { updater.proceedWithUpdate() },
+                onLater: { updater.dismissUpdate() }
+            )
         }
         .overlay(alignment: .bottom) {
             if let msg = postRecording.activityStatus {

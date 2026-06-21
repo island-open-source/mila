@@ -136,3 +136,24 @@ jobs:
             -retry-tests-on-failure \
             -test-iterations 3 \
             test
+
+      - name: Run What's New popup UI test (non-fatal)
+        # The "What's New" pre-update popup is driven entirely by a launch
+        # arg (`--ui-test-show-whats-new`) — no audio / LLM / network
+        # fixtures — so it's cheap to exercise. Kept NON-FATAL (`|| true`)
+        # for the same reason the unit-test step scopes out UI tests:
+        # XCUITest can't reliably foreground on hosted runners, and gating
+        # CI on that would mean a permanently flaky status. This still
+        # surfaces signal in the logs when the runner does foreground.
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Mila.xcodeproj \
+            -scheme Mila \
+            -configuration Debug \
+            -derivedDataPath build \
+            -destination 'platform=macOS' \
+            -only-testing:MilaUITests/WhatsNewPopupUITests \
+            -retry-tests-on-failure \
+            -test-iterations 3 \
+            test | xcpretty || true
