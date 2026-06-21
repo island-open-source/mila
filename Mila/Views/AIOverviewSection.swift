@@ -67,8 +67,7 @@ struct AIOverviewSection: View {
                                 multiline: multilineAlignment)
                 }
                 if !items.isEmpty {
-                    actionItemsView(alignment: alignmentValue,
-                                    multiline: multilineAlignment)
+                    actionItemsView()
                 }
             }
             .frame(maxWidth: .infinity, alignment: alignmentValue)
@@ -153,8 +152,7 @@ struct AIOverviewSection: View {
         }
     }
 
-    private func actionItemsView(alignment: Alignment,
-                                 multiline: TextAlignment) -> some View {
+    private func actionItemsView() -> some View {
         // One combined bullet line per item, joined into a SINGLE Text so
         // the whole list is drag-selectable / copyable at once (the old
         // per-item Text views couldn't be selected together). Non-breaking
@@ -181,15 +179,18 @@ struct AIOverviewSection: View {
                     .accessibilityIdentifier("detail.actionItems.copy")
                 }
             }
-            // Single selectable block. Drive the block's layout direction
-            // from the section's RTL decision so the bullets land on the
-            // correct (right) side for Hebrew — the per-item HStack used to
-            // put the "•" on the left even in RTL.
+            // Single selectable block. `\.layoutDirection` drives the base
+            // direction so the bullets land on the correct (right) side for
+            // Hebrew. With layoutDirection set, the alignment MUST be
+            // `.leading` (which mirrors to the right under RTL) — using
+            // `.trailing` here too double-flipped and pushed Hebrew action
+            // items to the LEFT, which was the bug. Let layoutDirection do
+            // the mirroring exactly once.
             Text(combined)
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: alignment)
-                .multilineTextAlignment(multiline)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .multilineTextAlignment(.leading)
                 .textSelection(.enabled)
                 .environment(\.layoutDirection, sectionIsRTL ? .rightToLeft : .leftToRight)
                 .contextMenu {

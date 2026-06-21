@@ -299,7 +299,15 @@ struct RecordingDetailView: View {
                         }
                     }
                     .padding()
-                    .environment(\.layoutDirection, recording.language == "he" ? .rightToLeft : .leftToRight)
+                    // RTL from the actual transcript text, not just the
+                    // language field: a recording made on "auto"/English
+                    // while the speaker talked Hebrew still has `language`
+                    // != "he", which left Hebrew transcripts LEFT-aligned.
+                    // SegmentRow uses `.leading`, so layoutDirection mirrors
+                    // it to the right exactly once.
+                    .environment(\.layoutDirection,
+                                 (recording.language == "he" || recording.fullText.isPredominantlyHebrew)
+                                 ? .rightToLeft : .leftToRight)
                 }
                 .contextMenu {
                     let other = RecordingLanguage.fromCode(recording.language).other
