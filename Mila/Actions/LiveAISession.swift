@@ -224,6 +224,17 @@ final class LiveAISession: ObservableObject {
     /// elapses, or fold into the running call.
     private func scheduleKick(immediate: Bool = false) {
         guard llmSettings.isConfigured, !latestTranscript.isEmpty else { return }
+        // Live AI toggled off mid-recording: don't fire, and drop any
+        // deferred tick. The feed loop stops calling feed() on toggle-off,
+        // but a pendingKickTask already sleeping out the min-interval floor
+        // would otherwise still wake and spawn a stray subprocess up to the
+        // interval later — folding a post-disable result into the summary.
+        guard liveAISettings.enabled else {
+            pendingKickTask?.cancel()
+            pendingKickTask = nil
+            coalesced = false
+            return
+        }
         // A call is already running — record that fresh transcript
         // arrived; the completion handler re-evaluates and fires one
         // more pass with the latest snapshot.

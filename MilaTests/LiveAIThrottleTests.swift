@@ -205,31 +205,9 @@ final class LiveAIThrottleTests: XCTestCase {
                       "final call should carry the closing transcript delta")
     }
 
-    // MARK: - Quantifying the win (documented model)
-
-    func test_callFrequency_reduction_over_15min_meeting() {
-        // The throttle guarantees consecutive calls start no closer than
-        // `max(callDuration, minInterval)` apart while transcript keeps
-        // arriving (kickDelay enforces the floor; call duration enforces
-        // the rest via serialization). This converts that guarantee into
-        // a spawn count for a 15-minute meeting.
-        //
-        // NB: the win is largest when calls are FAST relative to the
-        // floor (Haiku-class, a few seconds). For calls already slower
-        // than the floor the floor is a no-op — which is fine: its job is
-        // to bound the worst case and stop back-to-back spawning.
-        let meeting = 15.0 * 60
-        func spawns(minInterval: Double, callDuration: Double) -> Int {
-            Int(meeting / max(minInterval, callDuration)) + 1
-        }
-
-        // Fast (~4 s) calls: legacy spawns on nearly every gap.
-        let legacy = spawns(minInterval: 0, callDuration: 4)
-        let throttled = spawns(minInterval: 20, callDuration: 4)
-
-        XCTAssertGreaterThan(legacy, 200, "legacy fires very frequently")
-        XCTAssertLessThanOrEqual(throttled, 46, "20s floor caps spawns at ~1/20s")
-        XCTAssertGreaterThan(Double(legacy) / Double(throttled), 4.0,
-                             "the floor should cut subprocess spawns several-fold")
-    }
+    // (Removed `test_callFrequency_reduction_over_15min_meeting`: it asserted
+    // on a local arithmetic closure, never touching LiveAISession/kickDelay,
+    // so it would have passed even with the throttle removed. The pure
+    // `kickDelay` cases above + the behavioural feed()/clock tests cover the
+    // real throttle.)
 }

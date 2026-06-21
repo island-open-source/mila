@@ -223,10 +223,16 @@ struct AIOverviewSection: View {
         if trimmed.contains("\n") {
             body = trimmed
         } else {
-            let sentences = trimmed
-                .split(whereSeparator: { ".!?".contains($0) })
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
+            // Proper sentence segmentation via Foundation's tokenizer.
+            // A naive split on bare ".!?" mangled "3.30 p.m.", "v2.0",
+            // "acme.com", "https://…" into garbled mid-token bullets;
+            // `.bySentences` keeps those intact.
+            var sentences: [String] = []
+            trimmed.enumerateSubstrings(in: trimmed.startIndex..<trimmed.endIndex,
+                                        options: [.bySentences, .localized]) { sub, _, _, _ in
+                let s = (sub ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !s.isEmpty { sentences.append(s) }
+            }
             body = sentences.count > 1
                 ? sentences.map { "•\u{00A0}\($0)" }.joined(separator: "\n")
                 : trimmed
