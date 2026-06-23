@@ -170,6 +170,7 @@ distribution via the App Store you'd:
 
 Newest first. Dates are release dates.
 
+- **Unreleased** — Added an "Automatically summarize recordings" toggle (Settings → LLM, on by default) so Mila can run transcript-only: turn it off and no AI Overview is generated after a recording, on launch backfill, or on re-transcription.
 - **1.8.5** (2026-06-09) — Independent mic / app-audio capture toggles, AAC (`.m4a`) recordings, and a configurable recording-storage cap.
 - **1.8.4** (2026-06-09) — Fixed speaker diarization silently breaking in notarized builds (the bundled Python couldn't load torch's dylibs).
 - **1.8.3** (2026-06-08) — Mic-capture diagnostics, automatic language detection, and a post-recording sheet fix.

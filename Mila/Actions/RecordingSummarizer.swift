@@ -111,6 +111,7 @@ final class RecordingSummarizer: ObservableObject {
     /// Public so callers + tests can ask the same question we ask
     /// internally without re-deriving the predicate.
     func shouldSummarize(_ recording: Recording) -> Bool {
+        guard llmSettings.summaryEnabled else { return false }
         guard llmSettings.isConfigured else { return false }
         let transcript = recording.fullText
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -174,6 +175,10 @@ final class RecordingSummarizer: ObservableObject {
     /// Idempotent: re-runs are safe — recordings already in flight are
     /// skipped by `runSummary`'s own dedup check.
     func backfillIfNeeded() {
+        guard llmSettings.summaryEnabled else {
+            summarizerLog.log("backfill: skipped — auto-summary disabled")
+            return
+        }
         guard llmSettings.isConfigured else {
             summarizerLog.log("backfill: skipped — LLM not configured")
             return
@@ -334,6 +339,10 @@ final class RecordingSummarizer: ObservableObject {
     /// "skipped <id>: <reason>" shape backfill uses.
     private func logSkip(_ recording: Recording, force: Bool) {
         let id = recording.id
+        if !llmSettings.summaryEnabled {
+            summarizerLog.log("skipped \(self.shortID(id), privacy: .public): auto-summary disabled")
+            return
+        }
         if !llmSettings.isConfigured {
             summarizerLog.log("skipped \(self.shortID(id), privacy: .public): LLM not configured")
             return

@@ -75,6 +75,27 @@ final class RecordingSummarizerTests: XCTestCase {
         XCTAssertTrue(summarizer.shouldSummarize(rec))
     }
 
+    /// The auto-summary master switch. When the user turns off
+    /// "Automatically summarize recordings" the post-recording summary
+    /// must NOT fire, even with the LLM configured and a transcript ready.
+    func test_should_summarize_false_when_auto_summary_disabled() {
+        llm.tool = .claude
+        llm.summaryEnabled = false
+        let rec = Recording(title: "T", source: .microphone, audioFileName: "t.wav",
+                            fullText: "the transcript")
+        XCTAssertFalse(summarizer.shouldSummarize(rec),
+                       "Disabling auto-summary must gate shouldSummarize")
+    }
+
+    /// Default-on: existing users (and fresh installs) keep getting
+    /// summaries unless they explicitly opt out. A bare `defaults.bool`
+    /// would default to false and silently disable the feature for
+    /// everyone, so the property must default to true.
+    func test_summary_enabled_defaults_true() {
+        XCTAssertTrue(llm.summaryEnabled,
+                      "Auto-summary must default to on to preserve existing behaviour")
+    }
+
     func test_should_summarize_treats_whitespace_summary_as_empty() {
         llm.tool = .claude
         var rec = Recording(title: "T", source: .microphone, audioFileName: "t.wav",
@@ -256,6 +277,75 @@ final class RecordingSummarizerTests: XCTestCase {
         let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertEqual(updated.summary, "live_summary_from_recording",
                        "Late-arriving CLI output must not overwrite a summary that already exists")
+    }
+
+    /// End-to-end: with auto-summary disabled, a freshly transcribed
+    /// recording must be left untouched — the CLI is never invoked and no
+    /// summary lands. The script would write "SHOULD NOT RUN" if reached.
+    func test_summarize_skips_when_auto_summary_disabled() async throws {
+        let script = makeScript("""
+            #!/bin/sh
+            printf 'SHOULD NOT RUN'
+            """)
+        defer { try? FileManager.default.removeItem(at: script) }
+
+        llm.tool = .claude
+        llm.executablePath = script.path
+        llm.summaryEnabled = false
+
+        let audioURL = store.freshAudioURL(suggestedName: "Off")
+        try Data("x".utf8).write(to: audioURL)
+        let rec = Recording(
+            title: "Off",
+            source: .microphone,
+            audioFileName: audioURL.lastPathComponent,
+            fullText: "transcript text"
+        )
+        store.add(rec)
+
+        summarizer.summarizeIfNeeded(rec)
+        // Give a doomed CLI call time to land if the gate failed.
+        try await Task.sleep(nanoseconds: 500_000_000)
+        let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
+        XCTAssertNil(updated.summary,
+                     "No summary should be written while auto-summary is disabled")
+    }
+
+    /// The explicit "Regenerate summary" affordance is a deliberate user
+    /// action and must work even when AUTOMATIC summaries are turned off —
+    /// the toggle governs the post-recording auto path, not on-demand use.
+    func test_regenerate_works_even_when_auto_summary_disabled() async throws {
+        let script = makeScript("""
+            #!/bin/sh
+            printf 'ON DEMAND'
+            """)
+        defer { try? FileManager.default.removeItem(at: script) }
+
+        llm.tool = .claude
+        llm.executablePath = script.path
+        llm.summaryEnabled = false
+
+        let audioURL = store.freshAudioURL(suggestedName: "Manual")
+        try Data("x".utf8).write(to: audioURL)
+        var rec = Recording(
+            title: "Manual",
+            source: .microphone,
+            audioFileName: audioURL.lastPathComponent,
+            fullText: "transcript text"
+        )
+        // Mirrors the real UI path: the "Regenerate summary" action is only
+        // reachable on a recording that already has a summary (e.g. made
+        // before the user disabled auto-summary). Regenerate must still
+        // refresh it on demand despite the master switch being off.
+        rec.summary = "stale summary from before auto-summary was disabled"
+        store.add(rec)
+
+        summarizer.regenerate(rec)
+        try await waitForSummary(recordingID: rec.id,
+                                 timeoutSeconds: 120,
+                                 expected: "ON DEMAND")
+        let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
+        XCTAssertEqual(updated.summary, "ON DEMAND")
     }
 
     // MARK: - Force / regenerate path
