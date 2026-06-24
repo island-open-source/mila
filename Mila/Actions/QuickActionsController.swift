@@ -354,6 +354,15 @@ final class QuickActionsController: ObservableObject {
         }
         do {
             try await session.start(source: source, outputURL: url)
+            // Guarantee a fresh, isolated Live AI session for THIS recording
+            // (new Claude session UUID + cleared summary/action items) before
+            // any transcript can be fed. This is the single deterministic
+            // reset point — relying on the async `.recording` state observer
+            // (wireLiveAIPipeline) instead risked the transition being
+            // coalesced under load, leaving the previous recording's session
+            // live so its first tick `--resume`d the prior meeting →
+            // cross-recording summary/action-item bleed. See LiveAISession.start().
+            liveAISession?.start()
             activeJob = .recording(withSystemAudio: withSystemAudio)
             sleepGuard.preventIdleSleep(reason: "Mila is recording")
             startSilenceWatch(watching: source)
@@ -440,6 +449,9 @@ final class QuickActionsController: ObservableObject {
         do {
             let source: RecordingSource = includeMic ? .meeting : .systemAudio
             try await session.start(source: source, outputURL: url)
+            // Fresh, isolated per-recording Live AI session — see the matching
+            // call in startRecording() for the full rationale.
+            liveAISession?.start()
             activeJob = .recordingApp(processID: app?.processID, includeMic: includeMic)
             sleepGuard.preventIdleSleep(reason: "Mila is recording")
             startSilenceWatch(watching: source)

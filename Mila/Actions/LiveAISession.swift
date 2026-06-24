@@ -1,5 +1,8 @@
 import Foundation
 import Combine
+import OSLog
+
+private let liveAILog = Logger(subsystem: "io.island.whisper.IslandWhisper", category: "LiveAISession")
 
 /// Drives the LLM half of Live AI mode. Holds an action-item list, fires a
 /// debounced one-shot LLM call against the latest transcript on each tick,
@@ -143,6 +146,11 @@ final class LiveAISession: ObservableObject {
         sessionID = (llmSettings.tool == .claude) ? UUID() : nil
         sessionEstablished = false
         lastTranscriptSent = ""
+        // os_log (NOT print) so the session UUID lands in diagnostic reports.
+        // A fresh `start()` per recording is the invariant that prevents
+        // cross-recording `--resume` bleed; logging the new id makes a
+        // regression visible in `Mila-DiagnosticReport`.
+        liveAILog.log("start: fresh session=\(self.sessionID?.uuidString.prefix(8) ?? "none", privacy: .public) tool=\(self.llmSettings.tool.rawValue, privacy: .public)")
     }
 
     /// Wait until any in-flight (or coalesced-and-pending) LLM tick
@@ -186,6 +194,17 @@ final class LiveAISession: ObservableObject {
         coalesced = false
         latestTranscript = ""
         isThinking = false
+        // Clear the rolling AI output too. `cancel()` is both the leading
+        // half of `start()` AND the gated-hardware reset path
+        // (wireLiveAIPipeline calls it when Live AI is unavailable). In both
+        // cases the previous recording's summary / action items must NOT
+        // survive — otherwise `stopRecording` snapshots stale content onto a
+        // new recording. Previously cancel() left these intact, so the
+        // gated-branch comment claiming it "clears summary/actionItems" was a
+        // no-op. (start() also re-clears them; harmless redundancy.)
+        actionItems = []
+        summary = ""
+        lastError = nil
         pendingKickTask?.cancel()
         pendingKickTask = nil
         lastKickStartedAt = nil
@@ -371,6 +390,11 @@ TRANSCRIPT SO FAR:
         // session the model didn't actually produce.
         let kickSessionID = sessionID
         print("LiveAI[\(kickTag)]: tool=\(tool.rawValue) model=\(model.isEmpty ? "(default)" : model) session=\(llmSession) delta=\(useSession ? augmentedTranscript.count : 0)ch full=\(snapshot.count)ch items=\(actionItems.count) sending…")
+        // os_log mirror of the session decision so diagnostic reports capture
+        // it. A `.resume` on a recording's FIRST tick is the signature of the
+        // cross-recording bleed bug (the session wasn't freshly started); a
+        // healthy recording always opens with `.new`.
+        liveAILog.log("tick \(kickTag, privacy: .public): session=\(String(describing: llmSession), privacy: .public) established=\(self.sessionEstablished, privacy: .public)")
         inFlight = Task { @MainActor [weak self] in
             let llmStart = Date()
             do {

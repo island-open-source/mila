@@ -1031,14 +1031,14 @@ struct MilaApp: App {
                     // the ArraySlice on some Swift-concurrency edge.
                     transcriber?.ingest(samples)
                 }
-                // Always reset Live AI session state at .recording —
-                // this clears stale `summary` / `actionItems` from a
-                // previous recording so the AI pane never shows
-                // last meeting's content if the user toggles Live AI
-                // on mid-recording. start() is cheap (no subprocess
-                // until the first feed) and only allocates a session
-                // UUID for Claude.
-                aiSession.start()
+                // NOTE: the Live AI session is reset deterministically at
+                // record-start in QuickActionsController (`liveAISession?.start()`),
+                // NOT here. Driving the reset off this async `.recording`
+                // observer risked the transition being coalesced under load,
+                // leaving the previous recording's session live so its first
+                // tick `--resume`d the prior meeting → cross-recording bleed.
+                // By the time this runs, the session has already been freshly
+                // started for this recording.
                 diarizer.reset()
                 diarizer.similarityThreshold = aiSettings.speakerSimilarityThreshold
                 // Detach the diarizer start so a quick stop-after-start
@@ -1157,9 +1157,9 @@ struct MilaApp: App {
                 }
                 // Note: don't cancel aiSession here — QuickActionsController
                 // still needs to read .summary and .actionItems out of
-                // it when assembling the saved Recording. The next
-                // .recording transition's `aiSession.start()` clears
-                // these.
+                // it when assembling the saved Recording. The NEXT
+                // recording clears these via `liveAISession?.start()` at
+                // record-start (in QuickActionsController).
                 sessionRef.onLiveSamples = nil
             }
         }
