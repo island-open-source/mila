@@ -51,6 +51,15 @@ These patches live in `SpeakerDiarizer.swift`'s inline diarize script. If upgrad
 - Run tests with `make test` or via Xcode.
 
 ## Release Process
+- **Release notes are REQUIRED, first.** Every release must add
+  `RELEASE_NOTES/v<MARKETING_VERSION>.md` (Markdown, user-facing). This file
+  becomes the Sparkle appcast `<description>` — i.e. the in-app "What's New"
+  popup users see on update. Without it that popup is blank ("a new version is
+  available" with no changelog). The signing pipeline runs
+  `scripts/check-release-notes.sh <version>` **before building** and FAILS the
+  release if the file is missing/empty/boilerplate, so this can't be skipped.
+  Do NOT rely on the `project.yml` changelog comment or the GitHub Release body —
+  neither feeds the appcast. See `RELEASE_NOTES/README.md`.
 - Version is bumped only in `project.yml` (`MARKETING_VERSION` +
   `CURRENT_PROJECT_VERSION`). `Info.plist` inherits both via
   `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)` — never hardcode
