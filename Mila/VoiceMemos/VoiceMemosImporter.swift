@@ -61,16 +61,14 @@ final class VoiceMemosImporter: ObservableObject {
         guard !started else { return }
         started = true
         // React to the user toggling sync on/off or changing folder choices.
-        // Debounced so dragging through several checkboxes triggers one sync.
-        Publishers.Merge3(
-            settings.$isEnabled.map { _ in () },
-            settings.$selectedFolderUUIDs.map { _ in () },
-            settings.$includeUnfiled.map { _ in () }
-        )
-        .dropFirst()  // skip the initial value emitted on subscribe
-        .debounce(for: .milliseconds(400), scheduler: RunLoop.main)
-        .sink { [weak self] in self?.reconfigure() }
-        .store(in: &cancellables)
+        // `objectWillChange` (rather than merging the `@Published` projections)
+        // fires only on an actual change — no initial-value emissions to skip —
+        // and the debounce coalesces dragging through several checkboxes into
+        // one sync.
+        settings.objectWillChange
+            .debounce(for: .milliseconds(400), scheduler: RunLoop.main)
+            .sink { [weak self] in self?.reconfigure() }
+            .store(in: &cancellables)
 
         reconfigure()
     }
@@ -117,7 +115,17 @@ final class VoiceMemosImporter: ObservableObject {
         guard settings.isEnabled, settings.hasSelection else { return }
         isSyncing = true
         lastError = nil
-        defer { isSyncing = false }
+        defer {
+            isSyncing = false
+            // A folder change / FSEvents burst that arrived mid-sync set
+            // `pendingResync`; kick the next pass now that `isSyncing` is
+            // clear (doing this before clearing it would just re-set the flag
+            // and the second pass would never run).
+            if pendingResync {
+                pendingResync = false
+                requestSync()
+            }
+        }
 
         let folderUUIDs = settings.selectedFolderUUIDs
         let includeUnfiled = settings.includeUnfiled
@@ -173,11 +181,5 @@ final class VoiceMemosImporter: ObservableObject {
         totalImported += imported
         lastSyncDate = Date()
         log.log("VoiceMemos sync: imported \(imported), skipped short=\(skippedShort) format=\(skippedFormat) composition=\(skippedComposition) missing=\(skippedMissing)")
-
-        // A folder change / FSEvents burst arrived mid-sync — run once more.
-        if pendingResync {
-            pendingResync = false
-            requestSync()
-        }
     }
 }

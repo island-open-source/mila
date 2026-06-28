@@ -19,16 +19,17 @@ struct VoiceMemosSettingsTab: View {
         VStack(alignment: .leading, spacing: 14) {
             header
 
+            // Always render the master toggle — otherwise a user who enabled
+            // sync and then lost the library (iCloud off, etc.) would have no
+            // control left to turn the integration back off.
+            Toggle("Sync recordings from iPhone Voice Memos", isOn: $settings.isEnabled)
+                .toggleStyle(.switch)
+
             if !library.isAvailable {
                 unavailableNotice
-            } else {
-                Toggle("Sync recordings from iPhone Voice Memos", isOn: $settings.isEnabled)
-                    .toggleStyle(.switch)
-
-                if settings.isEnabled {
-                    folderPicker
-                    statusFooter
-                }
+            } else if settings.isEnabled {
+                folderPicker
+                statusFooter
             }
             Spacer()
         }
@@ -162,6 +163,10 @@ struct VoiceMemosSettingsTab: View {
             folders = loaded.folders
             unfiledCount = loaded.unfiled
         } catch {
+            // Drop stale data so a failed refresh can't leave the user
+            // interacting with folder choices that no longer reflect the DB.
+            folders = []
+            unfiledCount = 0
             loadError = error.localizedDescription
         }
     }

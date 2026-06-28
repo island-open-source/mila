@@ -247,14 +247,14 @@ struct VoiceMemosLibrary {
 
     private func open() throws -> OpaquePointer {
         guard isAvailable else { throw LibraryError.databaseMissing }
-        // Read-only. The DB is WAL-mode and actively written by voicememod;
-        // a read-only connection reads through the WAL so freshly-synced
-        // rows are visible, and SQLite guarantees readers never block or
-        // corrupt a concurrent writer. We never issue a write.
-        let uri = "file:\(databaseURL.path)?mode=ro"
+        // Read-only, opened by literal path (NOT a `file:` URI — a "?" or "#"
+        // in the path would be parsed as URI query/fragment). The DB is
+        // WAL-mode and actively written by voicememod; a read-only connection
+        // reads through the WAL so freshly-synced rows are visible, and SQLite
+        // guarantees readers never block or corrupt a concurrent writer. We
+        // never issue a write.
         var db: OpaquePointer?
-        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_URI
-        guard sqlite3_open_v2(uri, &db, flags, nil) == SQLITE_OK, let db else {
+        guard sqlite3_open_v2(databaseURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db else {
             let msg = db.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
             if let db { sqlite3_close(db) }
             throw LibraryError.openFailed(msg)
@@ -311,6 +311,10 @@ struct VoiceMemosLibrary {
     /// filename relative to the Recordings dir, but tolerate an absolute path
     /// just in case.
     private static func resolve(path: String, relativeTo base: URL) -> URL {
+        // `ZURL`-style columns may carry a full "file:///…" URL string.
+        if let url = URL(string: path), url.isFileURL {
+            return url
+        }
         if path.hasPrefix("/") {
             return URL(fileURLWithPath: path)
         }

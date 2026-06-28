@@ -55,9 +55,17 @@ final class DirectoryWatcher {
             return
         }
 
-        self.stream = stream
         FSEventStreamSetDispatchQueue(stream, queue)
-        FSEventStreamStart(stream)
+        // FSEventStreamStart "ought to always succeed" but can fail under
+        // resource pressure. On failure, tear the stream down and leave
+        // `self.stream` nil so a later `start()` can retry instead of looking
+        // active while no events ever arrive.
+        guard FSEventStreamStart(stream) else {
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            return
+        }
+        self.stream = stream
     }
 
     func stop() {

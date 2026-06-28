@@ -19,7 +19,14 @@ enum FileTranscriber {
         defer { if didStart { sourceURL.stopAccessingSecurityScopedResource() } }
 
         let title = titleOverride ?? sourceURL.deletingPathExtension().lastPathComponent
-        let destURL = store.freshAudioURL(suggestedName: title)
+        // `freshAudioURL` appends the suggested name as a path component, so a
+        // title containing "/" (or ":", which Finder maps to "/") would create
+        // nested/invalid paths. Sanitize the stem used for the audio file;
+        // the recording keeps the original `title` for display.
+        let safeStem = title
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        let destURL = store.freshAudioURL(suggestedName: safeStem)
 
         let duration = try await reencode(source: sourceURL, destination: destURL)
 
