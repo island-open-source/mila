@@ -483,6 +483,8 @@ private struct LLMSettingsTab: View {
                 namePromptSection
                 Divider()
                 actionPromptSection
+                Divider()
+                testSection
             }
             .padding(.vertical, 4)
         }
@@ -515,6 +517,18 @@ private struct LLMSettingsTab: View {
             }
             .font(.callout)
             Text("Leave blank to look up the binary on $PATH. Set this if `claude` / `cursor-agent` lives somewhere a GUI app won't see by default (e.g. ~/.local/bin, an asdf shim).")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Text("Extra CLI args").frame(width: 130, alignment: .leading)
+                TextField("(none) e.g. --model claude-sonnet-4-6", text: $settings.extraArgs)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.callout, design: .monospaced))
+            }
+            .font(.callout)
+            Text("Appended to every run (name suggestion, auto-summary, Send action, and the test below). Shell-style quoting is supported; for most CLIs a flag here overrides an earlier one. Live AI manages its own model and is unaffected.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -590,6 +604,164 @@ private struct LLMSettingsTab: View {
                 settings.postActionPrompt = $0
             }
         }
+    }
+
+    // MARK: Test panel
+
+    private var testSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Test")
+                .font(.title3.weight(.semibold))
+            Text("Run the configured prompt against a sample transcript to see exactly what Mila sends and what your CLI returns. Use this to debug a tool that isn't working — the command shown below is the literal one Mila runs, so you can copy it into a terminal yourself.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Picker("Prompt to test", selection: $settings.testPromptKind) {
+                ForEach(LLMSettings.TestPromptKind.allCases) { kind in
+                    Text(kind.label).tag(kind)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Text("Sample transcript")
+                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            TextEditor(text: $settings.testTranscript)
+                .font(.system(.callout, design: .monospaced))
+                .frame(minHeight: 90, maxHeight: 150)
+                .overlay(RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color.primary.opacity(0.15), lineWidth: 1))
+
+            Text("The test uses your configured Extra CLI args (above), so it reproduces exactly what a real run does.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                Button {
+                    Task { await settings.runTest() }
+                } label: {
+                    if settings.isTesting {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Running…")
+                        }
+                    } else {
+                        Text("Run test")
+                    }
+                }
+                .disabled(settings.tool == .none || settings.isTesting)
+
+                if settings.tool == .none {
+                    Text("Select a tool above first.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+
+            if let result = settings.lastTestResult {
+                LLMTestResultView(result: result)
+            }
+        }
+    }
+}
+
+/// Renders the outcome of a Settings → LLM test run: the exact command (with a
+/// Copy button), a status line, and the captured stdout/stderr. Designed so a
+/// user who can't get their CLI working can read or copy everything they need
+/// to self-diagnose.
+private struct LLMTestResultView: View {
+    let result: LLMTestResult
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            statusLine
+
+            if !result.command.isEmpty {
+                labeledBlock("Command", text: result.command, copyable: true)
+            }
+            if let error = result.setupError {
+                labeledBlock("Problem", text: error, copyable: false)
+            }
+            if result.didLaunch {
+                if !result.stdout.isEmpty {
+                    labeledBlock("Output (stdout)", text: result.stdout, copyable: true)
+                }
+                if !trimmed(result.stderr).isEmpty {
+                    labeledBlock("Diagnostics (stderr)", text: result.stderr, copyable: true)
+                }
+                if result.stdout.isEmpty && trimmed(result.stderr).isEmpty {
+                    Text("The CLI produced no output.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(12)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var statusLine: some View {
+        HStack(spacing: 8) {
+            icon
+            Text(statusText)
+                .font(.callout.weight(.medium))
+            Spacer()
+            if result.durationSeconds > 0 {
+                Text(String(format: "%.1fs", result.durationSeconds))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var icon: some View {
+        if result.succeeded {
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+        } else {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+        }
+    }
+
+    private var statusText: String {
+        if result.succeeded { return "Success" }
+        if result.timedOut { return "Timed out — the CLI didn't respond in time" }
+        if let error = result.setupError, !result.didLaunch { return error }
+        if let code = result.exitCode { return "CLI exited with status \(code)" }
+        return "Failed"
+    }
+
+    private func labeledBlock(_ label: String, text: String, copyable: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if copyable {
+                    Button {
+                        let pb = NSPasteboard.general
+                        pb.clearContents()
+                        pb.setString(text, forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Copy to clipboard")
+                }
+            }
+            ScrollView {
+                Text(text)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+            }
+            .frame(maxHeight: 160)
+            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
+        }
+    }
+
+    private func trimmed(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

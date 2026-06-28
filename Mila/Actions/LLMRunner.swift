@@ -33,6 +33,31 @@ enum LLMRunnerError: LocalizedError {
     }
 }
 
+/// Everything the Settings → LLM test panel needs to explain a run to the
+/// user. Produced by `LLMRunner.diagnose`. Unlike `LLMRunner.run`, nothing is
+/// thrown away on failure: the user sees the exact command, the exit code, and
+/// both streams so they can self-diagnose (or re-run `command` in a terminal).
+struct LLMTestResult: Equatable {
+    /// The exact, shell-quoted command line that was launched (or would have
+    /// been, if we got far enough to build it). Empty when no tool/executable
+    /// was resolved.
+    var command: String = ""
+    /// True only when the CLI launched and exited 0.
+    var succeeded: Bool = false
+    /// Process exit code, or nil when the CLI never launched (setup error).
+    var exitCode: Int32? = nil
+    var stdout: String = ""
+    var stderr: String = ""
+    var durationSeconds: TimeInterval = 0
+    /// Set when something prevented the CLI from even running — no tool
+    /// selected, executable not on PATH, launch failure.
+    var setupError: String? = nil
+    var timedOut: Bool = false
+
+    /// Whether anything actually ran. False for pure setup failures.
+    var didLaunch: Bool { exitCode != nil }
+}
+
 /// Spawns the configured `claude` or `cursor-agent` binary with the user's
 /// prompt + transcript and returns whatever the CLI prints to stdout.
 ///
@@ -93,6 +118,11 @@ enum LLMRunner {
     /// configured) — the wire format collapses to the old transcript-only
     /// shape in that case.
     ///
+    /// `extraArgs` are appended verbatim after the tool's standard arguments
+    /// — the user's persisted "Extra CLI args" from Settings → LLM (e.g.
+    /// `--model …`, a permission flag). Empty for callers that manage their
+    /// own args (Live AI pins its own model).
+    ///
     /// `timeout` defaults to 5 minutes. Pass a smaller value for foreground
     /// callers that block UI (e.g. the Suggest button).
     static func run(tool: LLMTool,
@@ -102,6 +132,7 @@ enum LLMRunner {
                     executablePathOverride: String?,
                     model: String? = nil,
                     session: LLMSession = .none,
+                    extraArgs: [String] = [],
                     timeout: TimeInterval = LLMRunner.defaultTimeout) async throws -> String {
         guard tool != .none else { throw LLMRunnerError.toolDisabled }
 
@@ -139,12 +170,25 @@ enum LLMRunner {
                 }()
                 DispatchQueue.global(qos: .userInitiated).async {
                     do {
-                        let result = try runProcess(executable: executable,
-                                                    arguments: tool.arguments(prompt: fullPrompt, model: model, session: session),
-                                                    timeout: timeout,
-                                                    handle: handle,
-                                                    sandboxKey: sandboxKey)
-                        continuation.resume(returning: result)
+                        let outcome = try executeProcess(executable: executable,
+                                                         arguments: tool.arguments(prompt: fullPrompt, model: model, session: session) + extraArgs,
+                                                         timeout: timeout,
+                                                         handle: handle,
+                                                         sandboxKey: sandboxKey)
+                        // The Swift Task that drove us was cancelled mid-flight
+                        // — `handle` SIGTERM'd the process, so the user-visible
+                        // truth is "we cancelled it", not "the CLI crashed".
+                        if outcome.cancelled {
+                            continuation.resume(throwing: LLMRunnerError.cancelled)
+                        } else if outcome.timedOut {
+                            continuation.resume(throwing: LLMRunnerError.timedOut(seconds: Int(timeout.rounded(.up))))
+                        } else if outcome.exitCode != 0 {
+                            continuation.resume(throwing: LLMRunnerError.nonZeroExit(
+                                code: outcome.exitCode,
+                                stderr: outcome.stderr.isEmpty ? outcome.stdout : outcome.stderr))
+                        } else {
+                            continuation.resume(returning: outcome.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
+                        }
                     } catch {
                         continuation.resume(throwing: error)
                     }
@@ -155,11 +199,150 @@ enum LLMRunner {
         }
     }
 
-    private static func runProcess(executable: URL,
-                                   arguments: [String],
-                                   timeout: TimeInterval,
-                                   handle: ProcessHandle,
-                                   sandboxKey: String? = nil) throws -> String {
+    /// Run the configured CLI like `run` does, but never throw — capture the
+    /// exact command line, exit code, stdout, and stderr and hand them all
+    /// back so the Settings → LLM test panel can show the user precisely what
+    /// happened. This is the "why isn't my LLM working?" debugging path: the
+    /// returned `command` is copy-pasteable into a terminal so the user can
+    /// reproduce the run themselves.
+    ///
+    /// `extraArgs` are appended verbatim after the tool's standard arguments
+    /// — the user types them in the test panel (e.g. `--model claude-sonnet-4-6`,
+    /// `--debug`) so they can probe param changes without us hardcoding a
+    /// model picker. Setup problems (no tool selected, executable not found)
+    /// come back in `setupError` rather than as an exception.
+    static func diagnose(tool: LLMTool,
+                         prompt: String,
+                         transcript: String,
+                         summary: String = "",
+                         extraArgs: [String] = [],
+                         executablePathOverride: String?,
+                         model: String? = nil,
+                         timeout: TimeInterval = 120) async -> LLMTestResult {
+        guard tool != .none else {
+            return LLMTestResult(setupError: LLMRunnerError.toolDisabled.errorDescription ?? "No LLM configured.")
+        }
+        let executable: URL
+        do {
+            executable = try resolveExecutable(tool: tool, override: executablePathOverride)
+        } catch {
+            let msg = (error as? LLMRunnerError)?.errorDescription ?? error.localizedDescription
+            return LLMTestResult(setupError: msg)
+        }
+        let fullPrompt = composedPrompt(prompt, transcript: transcript, summary: summary)
+        let args = tool.arguments(prompt: fullPrompt, model: model) + extraArgs
+        let command = ([executable.path] + args).map(shellQuote).joined(separator: " ")
+        let start = Date()
+        // Bridge Task cancellation to the child process, same as `run` — if
+        // the test is cancelled (Settings closed, a newer run started), SIGTERM
+        // the CLI instead of leaving it alive until the timeout.
+        let handle = ProcessHandle()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let elapsed: () -> TimeInterval = { Date().timeIntervalSince(start) }
+                    do {
+                        let outcome = try executeProcess(executable: executable,
+                                                         arguments: args,
+                                                         timeout: timeout,
+                                                         handle: handle,
+                                                         sandboxKey: nil)
+                        continuation.resume(returning: LLMTestResult(
+                            command: command,
+                            succeeded: !outcome.timedOut && outcome.exitCode == 0,
+                            exitCode: outcome.exitCode,
+                            stdout: outcome.stdout,
+                            stderr: outcome.stderr,
+                            durationSeconds: elapsed(),
+                            timedOut: outcome.timedOut))
+                    } catch {
+                        // Only `launchFailed` reaches here now.
+                        let msg = (error as? LLMRunnerError)?.errorDescription ?? error.localizedDescription
+                        continuation.resume(returning: LLMTestResult(
+                            command: command,
+                            durationSeconds: elapsed(),
+                            setupError: msg))
+                    }
+                }
+            }
+        } onCancel: {
+            handle.terminate()
+        }
+    }
+
+    /// Split a free-text "extra arguments" string into an argv array, honoring
+    /// single quotes, double quotes, and backslash escapes the way a POSIX
+    /// shell would — so a user can paste `--model "claude sonnet"` and get two
+    /// tokens, not three. Deliberately small: it covers the quoting users
+    /// actually type, not the full shell grammar.
+    static func tokenizeArguments(_ input: String) -> [String] {
+        var args: [String] = []
+        var current = ""
+        var hasToken = false
+        var inSingle = false
+        var inDouble = false
+        let chars = Array(input)
+        var i = 0
+        while i < chars.count {
+            let c = chars[i]
+            if inSingle {
+                if c == "'" { inSingle = false } else { current.append(c) }
+            } else if inDouble {
+                if c == "\"" {
+                    inDouble = false
+                } else if c == "\\", i + 1 < chars.count, chars[i + 1] == "\"" || chars[i + 1] == "\\" {
+                    i += 1
+                    current.append(chars[i])
+                } else {
+                    current.append(c)
+                }
+            } else if c == "'" {
+                inSingle = true; hasToken = true
+            } else if c == "\"" {
+                inDouble = true; hasToken = true
+            } else if c == "\\", i + 1 < chars.count {
+                i += 1
+                current.append(chars[i]); hasToken = true
+            } else if c == " " || c == "\t" || c == "\n" {
+                if hasToken { args.append(current); current = ""; hasToken = false }
+            } else {
+                current.append(c); hasToken = true
+            }
+            i += 1
+        }
+        if hasToken { args.append(current) }
+        return args
+    }
+
+    /// Quote a single argv token for display so the rendered `command` can be
+    /// pasted back into a shell and run as-is. Tokens made only of "safe"
+    /// characters are left bare; everything else is single-quoted with any
+    /// embedded single quotes escaped the classic `'\''` way.
+    static func shellQuote(_ s: String) -> String {
+        if s.isEmpty { return "''" }
+        let safe = CharacterSet(charactersIn:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_./=:,@+")
+        if s.unicodeScalars.allSatisfy({ safe.contains($0) }) { return s }
+        return "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// Raw result of a single CLI invocation, before any success/failure
+    /// interpretation. `run` maps this onto its throwing contract; `diagnose`
+    /// surfaces every field verbatim so the Settings test panel can show the
+    /// user exactly what happened (exit code, stdout, stderr) even on failure.
+    struct ProcessOutcome {
+        let stdout: String
+        let stderr: String
+        let exitCode: Int32
+        let timedOut: Bool
+        let cancelled: Bool
+    }
+
+    private static func executeProcess(executable: URL,
+                                       arguments: [String],
+                                       timeout: TimeInterval,
+                                       handle: ProcessHandle,
+                                       sandboxKey: String? = nil) throws -> ProcessOutcome {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
@@ -256,29 +439,33 @@ enum LLMRunner {
             runningGroup.leave()
         }
         let deadline = DispatchTime.now() + .seconds(Int(timeout.rounded(.up)))
-        if runningGroup.wait(timeout: deadline) == .timedOut {
+        let timedOut = runningGroup.wait(timeout: deadline) == .timedOut
+        if timedOut {
+            // SIGTERM first; if the CLI ignores it, hard-kill after a short
+            // grace period so we don't read half-drained pipes or remove the
+            // sandbox out from under a still-running child.
             process.terminate()
-            _ = group.wait(timeout: .now() + 1)
-            throw LLMRunnerError.timedOut(seconds: Int(timeout.rounded(.up)))
+            if runningGroup.wait(timeout: .now() + 1) == .timedOut {
+                kill(process.processIdentifier, SIGKILL)
+                runningGroup.wait()
+            }
         }
+        // Drain the pipe readers once the process is known to be gone (either it
+        // exited on its own or we killed it above).
         group.wait()
-
-        // The Swift Task that drove us was cancelled mid-flight — `handle`
-        // has SIGTERM'd the process so it likely exited with a non-zero
-        // status, but the user-visible truth is "we cancelled it", not
-        // "the CLI crashed".
-        if handle.wasTerminated {
-            throw LLMRunnerError.cancelled
-        }
 
         let stdout = String(data: outData, encoding: .utf8) ?? ""
         let stderr = String(data: errData, encoding: .utf8) ?? ""
 
-        guard process.terminationStatus == 0 else {
-            throw LLMRunnerError.nonZeroExit(code: process.terminationStatus,
-                                             stderr: stderr.isEmpty ? stdout : stderr)
-        }
-        return stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ProcessOutcome(stdout: stdout,
+                              stderr: stderr,
+                              // After a timeout the process was terminated, so
+                              // its status is meaningless — report the standard
+                              // SIGTERM-ish code so callers don't treat it as a
+                              // clean exit.
+                              exitCode: timedOut ? -1 : process.terminationStatus,
+                              timedOut: timedOut,
+                              cancelled: handle.wasTerminated)
     }
 
     /// Create a brand-new empty directory inside the system temp area. The

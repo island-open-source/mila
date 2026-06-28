@@ -128,6 +128,7 @@ struct SendToLLMSheet: View {
                                 transcript: transcriptSnapshot,
                                 summary: summarySnapshot,
                                 executableOverride: executableOverride,
+                                extraArgs: llm.extraArgsTokens,
                                 cliTimeout: llm.cliTimeout)
     }
 }

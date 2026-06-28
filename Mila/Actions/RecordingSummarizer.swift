@@ -257,6 +257,7 @@ final class RecordingSummarizer: ObservableObject {
             ? nil
             : llmSettings.executablePath
         let model = liveAISettings.model
+        let extraArgs = llmSettings.extraArgsTokens
         let promptLanguageName: String = {
             switch liveAISettings.outputLanguage {
             case .auto:
@@ -298,6 +299,7 @@ final class RecordingSummarizer: ObservableObject {
                     transcript: transcript,
                     executablePathOverride: executableOverride,
                     model: model.isEmpty ? nil : model,
+                    extraArgs: extraArgs,
                     timeout: timeout
                 )
                 let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines)

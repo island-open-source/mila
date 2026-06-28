@@ -161,9 +161,96 @@ final class LLMSettings: ObservableObject {
         didSet { defaults.set(summaryEnabled, forKey: Keys.summaryEnabled) }
     }
 
+    /// Free-text extra CLI arguments appended to EVERY post-recording
+    /// invocation (title suggestion, auto-summary, Send-action) as well as the
+    /// test panel run — lets the user pin a model or pass debug/permission
+    /// flags without us baking in a picker. Tokenized shell-style before being
+    /// passed to the CLI (see `extraArgsTokens`). Live AI is excluded: it pins
+    /// its own model and would clash with a user-supplied `--model`.
+    @Published var extraArgs: String {
+        didSet {
+            guard extraArgs != oldValue else { return }
+            defaults.set(extraArgs, forKey: Keys.extraArgs)
+        }
+    }
+
+    /// `extraArgs` parsed into an argv array, ready to hand to `LLMRunner`.
+    var extraArgsTokens: [String] { LLMRunner.tokenizeArguments(extraArgs) }
+
     /// Convenience the UI uses to decide whether to surface the rename /
     /// run-action buttons at all.
     var isConfigured: Bool { tool != .none }
+
+    // MARK: - Test / diagnostics
+    //
+    // Backing state for the Settings → LLM "Test" panel. The transcript /
+    // result here are an ephemeral scratch area for answering "why isn't my
+    // LLM working?" — they're not persisted (the extra-args the test uses ARE
+    // persisted; see `extraArgs` above). Kept on the app-lifetime settings
+    // object (not view @State) so the result survives tab switches while the
+    // Settings window is open.
+
+    /// Which configured prompt the test runs.
+    enum TestPromptKind: String, CaseIterable, Identifiable {
+        case name
+        case action
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .name:   return "Name suggestion"
+            case .action: return "Action"
+            }
+        }
+    }
+
+    @Published var testPromptKind: TestPromptKind = .name
+    /// Editable transcript fed to the test run; prefilled with a short sample
+    /// meeting so the button works on a fresh install with one click.
+    @Published var testTranscript: String = LLMSettings.sampleTranscript
+    @Published private(set) var isTesting = false
+    @Published private(set) var lastTestResult: LLMTestResult?
+
+    /// The prompt the test will actually send, given the current selection.
+    var testPrompt: String {
+        testPromptKind == .name ? namePrompt : postActionPrompt
+    }
+
+    /// Run the configured prompt against the sample transcript and stash the
+    /// full result (command + streams + exit code) for the UI to render.
+    func runTest() async {
+        // A fast double-tap can enqueue two `Task { await runTest() }` calls
+        // before the button re-renders disabled — bail on the second so we
+        // don't spawn duplicate subprocesses or let a late finisher overwrite
+        // a newer result.
+        guard !isTesting else { return }
+        isTesting = true
+        lastTestResult = nil
+        defer { isTesting = false }
+        let result = await LLMRunner.diagnose(
+            tool: tool,
+            prompt: testPrompt,
+            transcript: testTranscript,
+            extraArgs: extraArgsTokens,
+            executablePathOverride: executablePath.isEmpty ? nil : executablePath,
+            // Use the same timeout real runs use so the test faithfully
+            // reproduces production behaviour — including letting the user
+            // confirm that raising the timeout fixes a slow agentic run.
+            timeout: cliTimeout)
+        lastTestResult = result
+    }
+
+    /// Sample meeting transcript used by the test panel. Deliberately short,
+    /// concrete, and decision-laden so both "suggest a title" and "summarize"
+    /// prompts have something real to chew on.
+    static let sampleTranscript = """
+        Alex: Thanks for joining. The goal today is to lock the Q3 launch date for the mobile app.
+        Priya: Engineering is on track — the remaining blocker is the offline-sync bug, which I expect closed by Wednesday.
+        Sam: Marketing needs two weeks of lead time once we have a firm date for the press push.
+        Alex: Then let's target August 19th for launch, with a go/no-go check the Friday before.
+        Priya: Works for me. I'll send the updated timeline today.
+        Sam: I'll draft the announcement and share it for review by next Monday.
+        Alex: Great — action items: Priya closes the sync bug and sends the timeline, Sam drafts the announcement. Let's reconvene Friday.
+        """
 
     private let defaults: UserDefaults
 
@@ -181,6 +268,7 @@ final class LLMSettings: ObservableObject {
         // everyone on upgrade. Treat "key absent" as true.
         self.summaryEnabled = (defaults.object(forKey: Keys.summaryEnabled) as? Bool) ?? true
         self.cliTimeout = (defaults.object(forKey: Keys.cliTimeout) as? Double) ?? 300
+        self.extraArgs = defaults.string(forKey: Keys.extraArgs) ?? ""
     }
 
     /// Default name prompt is deliberately *tool-free*. The previous default
@@ -215,5 +303,6 @@ final class LLMSettings: ObservableObject {
         static let actionPrompt = "llm.action.prompt"
         static let summaryEnabled = "llm.summary.enabled"
         static let cliTimeout = "llm.cli.timeout"
+        static let extraArgs = "llm.extraArgs"
     }
 }
