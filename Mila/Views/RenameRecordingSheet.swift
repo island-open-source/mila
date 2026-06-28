@@ -214,6 +214,13 @@ struct RenameRecordingSheet: View {
         // bind ESC to Discard — the whole point of this change is that
         // dismissing the sheet must never throw audio away.
         .onExitCommand { save() }
+        // Catch any suggestion that landed in the store between this view's
+        // init (which snapshotted `initialRecording.title`) and `onChange`
+        // being installed — otherwise a Save could write the stale default
+        // back over the stored suggestion.
+        .onAppear {
+            if !userEditedTitle { title = liveRecording.title }
+        }
         // Mirror a background auto-suggestion into the field as it lands —
         // but only until the user expresses their own preference. The
         // coordinator owns the suggestion now (Issue #34): it keeps running
