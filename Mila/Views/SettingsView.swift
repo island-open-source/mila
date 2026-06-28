@@ -398,11 +398,44 @@ final class HotkeyCaptureNSView: NSView {
 private struct ModelsSettingsTab: View {
     @EnvironmentObject private var manager: ModelManager
     @EnvironmentObject private var transcription: TranscriptionService
+    @EnvironmentObject private var remote: RemoteTranscriptionSettings
 
     var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Transcription backend")
+                    .font(.title3.weight(.semibold))
+                Text("Mila transcribes on-device by default — audio never leaves your Mac. Switch to a remote API to offload transcription to OpenAI's Whisper API or any self-hosted OpenAI-compatible server.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Picker("Backend", selection: $remote.backend) {
+                    ForEach(TranscriptionBackend.allCases) { backend in
+                        Text(backend.displayName).tag(backend)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                switch remote.backend {
+                case .local:
+                    localModelsSection
+                case .remote:
+                    RemoteBackendSection(remote: remote)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+        }
+    }
+
+    private var localModelsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Whisper models")
-                .font(.title3.weight(.semibold))
+                .font(.headline)
             Text("English dictation uses the OpenAI turbo model; Hebrew uses ivrit.ai. Both download automatically on first launch (~1.6 GB each). The optional ivrit.ai large model is higher accuracy but ~2× slower.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -413,9 +446,111 @@ private struct ModelsSettingsTab: View {
                     ModelRow(model: model)
                 }
             }
-            Spacer()
         }
+    }
+}
+
+/// Endpoint / model / API-key configuration for the remote transcription
+/// backend, plus a connectivity test and the mandatory "audio leaves your
+/// device" warning.
+private struct RemoteBackendSection: View {
+    @ObservedObject var remote: RemoteTranscriptionSettings
+
+    private static let setupGuideURL = URL(string: "https://github.com/island-io/mila/blob/main/docs/REMOTE_TRANSCRIPTION_SERVER.md")!
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            privacyWarning
+
+            VStack(alignment: .leading, spacing: 8) {
+                fieldRow(label: "Endpoint") {
+                    TextField(RemoteTranscriptionSettings.defaultEndpoint, text: $remote.endpoint)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                }
+                Text("Base URL of an OpenAI-compatible API. Mila appends `/audio/transcriptions`. Defaults to OpenAI; point it at your own server for ivrit.ai or other models.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                fieldRow(label: "Model") {
+                    TextField(RemoteTranscriptionSettings.defaultModel, text: $remote.model)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                }
+
+                fieldRow(label: "API key") {
+                    SecureField("Stored in your Keychain", text: $remote.apiKey)
+                        .textFieldStyle(.roundedBorder)
+                }
+                Text("Sent as a Bearer token and stored encrypted in the macOS Keychain — never written to disk in plaintext. Leave blank for self-hosted servers that don't require auth.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    Task { await remote.testConnection() }
+                } label: {
+                    if case .testing = remote.testStatus {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text("Test connection")
+                    }
+                }
+                .disabled(remote.endpointURL == nil || remote.testStatus == .testing)
+
+                testStatusLabel
+                Spacer()
+            }
+
+            Divider()
+
+            Link(destination: Self.setupGuideURL) {
+                Label("How to host ivrit.ai (or any model) behind this API", systemImage: "book")
+                    .font(.callout)
+            }
+        }
+    }
+
+    private var privacyWarning: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            Text("Audio leaves your device. When the remote backend is active, every recording is uploaded to the endpoint below for transcription. Use a server you trust.")
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    @ViewBuilder
+    private var testStatusLabel: some View {
+        switch remote.testStatus {
+        case .idle, .testing:
+            EmptyView()
+        case .ok(let message):
+            Label(message, systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .font(.caption)
+        case .failed(let message):
+            Label(message, systemImage: "xmark.circle.fill")
+                .foregroundStyle(.red)
+                .font(.caption)
+                .lineLimit(2)
+        }
+    }
+
+    private func fieldRow<Content: View>(label: String,
+                                         @ViewBuilder content: () -> Content) -> some View {
+        HStack {
+            Text(label).frame(width: 80, alignment: .leading)
+            content()
+        }
+        .font(.callout)
     }
 }
 

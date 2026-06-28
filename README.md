@@ -96,6 +96,20 @@ Models live at:
 
 The app picks them up from that directory automatically.
 
+### Remote transcription (optional)
+
+By default Mila transcribes entirely on-device — audio never leaves your Mac.
+If you'd rather offload transcription (e.g. on a low-powered Mac, or to use a
+Hebrew-tuned model that's too large to run locally), **Settings → Models** lets
+you switch the backend to any OpenAI-compatible `/v1/audio/transcriptions`
+endpoint: OpenAI's own Whisper API, or a self-hosted server. The API key is
+stored in your Keychain, and the UI flags that audio leaves the device while
+this backend is active.
+
+To run [ivrit.ai](https://www.ivrit.ai/)'s Hebrew models (or any other Whisper
+model) behind this API on your own machine, see
+**[docs/REMOTE_TRANSCRIPTION_SERVER.md](docs/REMOTE_TRANSCRIPTION_SERVER.md)**.
+
 ## Required permissions
 
 On first use macOS will prompt for the following — all are required for the

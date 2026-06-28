@@ -54,6 +54,18 @@ final class TranscriptionService: ObservableObject {
     private let modelManager: ModelManager
     private let diarizationSettings: DiarizationSettings
 
+    /// User's transcription backend choice (on-device vs remote API). When the
+    /// remote backend is active + configured, transcription is routed through
+    /// `remoteEngine` instead of the local whisper.cpp `engine`, and the
+    /// local-model install gate is skipped (a remote user may have no `.bin`
+    /// downloaded at all).
+    private let remoteSettings: RemoteTranscriptionSettings
+
+    /// OpenAI-compatible remote engine. Constructed unconditionally but only
+    /// exercised when `remoteSettings.isActive` — cheap to hold idle (no
+    /// weights, just a URLSession).
+    private let remoteEngine = RemoteWhisperEngine()
+
     /// Hook fired once per recording that finished transcription
     /// successfully (status == .completed, non-empty text). MilaApp
     /// wires this to `RecordingSummarizer.summarizeIfNeeded` so every
@@ -97,10 +109,15 @@ final class TranscriptionService: ObservableObject {
     init(store: RecordingStore,
          modelManager: ModelManager,
          diarizationSettings: DiarizationSettings,
+         remoteSettings: RemoteTranscriptionSettings? = nil,
          engine: any TranscribingEngine = WhisperEngine()) {
         self.store = store
         self.modelManager = modelManager
         self.diarizationSettings = diarizationSettings
+        // Default constructed inside this @MainActor init (a default argument
+        // can't, since those evaluate in a nonisolated context). Tests that
+        // don't exercise the remote path simply omit it.
+        self.remoteSettings = remoteSettings ?? RemoteTranscriptionSettings()
         self.engine = engine
         // Bridge the engine's preparation callback onto the main
         // actor so SwiftUI subscribers see flips through `@Published`
@@ -241,6 +258,28 @@ final class TranscriptionService: ObservableObject {
     /// quality on one path or the other, so make every call site declare its
     /// intent.
     func transcribeOnceSegments(samples: [Float], language: String, audioCtx: Int32?) async -> [TranscriptSegment] {
+        // Remote backend: route dictation/live utterances to the configured
+        // endpoint too, so the user's "global backend" choice holds for every
+        // path. Misconfiguration degrades to an empty result (same contract as
+        // a missing local model) rather than throwing into the live loop.
+        if remoteSettings.isActive {
+            guard remoteSettings.isConfigured, let config = remoteSettings.currentConfig() else {
+                serviceLog.log("transcribeOnceSegments: SKIP — remote backend active but not configured")
+                return []
+            }
+            await remoteEngine.configure(config)
+            do {
+                let segs = try await remoteEngine.transcribe(samples: samples,
+                                                             language: language,
+                                                             audioCtx: audioCtx,
+                                                             progress: nil,
+                                                             isCancelled: nil)
+                return segs
+            } catch {
+                serviceLog.log("transcribeOnceSegments(remote): FAILED error=\(error.localizedDescription, privacy: .public)")
+                return []
+            }
+        }
         let candidate = modelManager.model(for: language)
         guard let model = candidate,
               modelManager.isInstalled(model) else {
@@ -315,6 +354,7 @@ final class TranscriptionService: ObservableObject {
     /// global destructors run (which is what triggered SIGABRT on quit).
     func shutdown() async {
         await engine.shutdown()
+        await remoteEngine.shutdown()
     }
 
     /// Abandon the transcription of `recordingID`. If it's still in the queue
@@ -368,17 +408,37 @@ final class TranscriptionService: ObservableObject {
             return
         }
 
-        guard let model = modelManager.model(for: recording.language) else {
-            lastError = "No model selected."
-            markFailed(recording)
-            return
+        // Resolve the backend up front. Remote skips the local-model gate
+        // entirely (a remote-only user may never have downloaded a `.bin`);
+        // local keeps the existing "is the model installed yet?" guards.
+        let useRemote = remoteSettings.isActive
+        let localModel: WhisperModel?
+        let modelDisplayName: String
+        if useRemote {
+            guard remoteSettings.isConfigured, let config = remoteSettings.currentConfig() else {
+                lastError = "Remote transcription is selected but not configured. Open Settings → Models to set the endpoint and API key."
+                markFailed(recording)
+                return
+            }
+            await remoteEngine.configure(config)
+            localModel = nil
+            modelDisplayName = remoteSettings.modelLabel
+        } else {
+            guard let model = modelManager.model(for: recording.language) else {
+                lastError = "No model selected."
+                markFailed(recording)
+                return
+            }
+            guard modelManager.isInstalled(model) else {
+                lastError = "Whisper model is still downloading. Try again once it's ready."
+                print("Transcribe skipped: model \(model.name) not installed yet")
+                markFailed(recording)
+                return
+            }
+            localModel = model
+            modelDisplayName = model.displayName
         }
-        guard modelManager.isInstalled(model) else {
-            lastError = "Whisper model is still downloading. Try again once it's ready."
-            print("Transcribe skipped: model \(model.name) not installed yet")
-            markFailed(recording)
-            return
-        }
+        let activeEngine: any TranscribingEngine = useRemote ? remoteEngine : engine
 
         // Re-fetch from the store so we work against the latest persisted version.
         // (The recording may have been edited or even soft-deleted between
@@ -401,7 +461,7 @@ final class TranscriptionService: ObservableObject {
             .isEmpty
 
         working.status = .running
-        working.modelName = model.displayName
+        working.modelName = modelDisplayName
         store.update(working)
 
         let recordingID = recording.id
@@ -425,8 +485,13 @@ final class TranscriptionService: ObservableObject {
         await observerSetupTask.value
 
         do {
-            try await engine.loadIfNeeded(modelURL: modelManager.url(for: model),
-                                          displayName: model.displayName)
+            // Local backend needs the whisper weights loaded (and the CoreML
+            // encoder compiled) before transcribing. The remote engine has no
+            // weights — `configure` already ran above.
+            if let localModel {
+                try await engine.loadIfNeeded(modelURL: modelManager.url(for: localModel),
+                                              displayName: localModel.displayName)
+            }
             let audioURL = store.audioURL(for: recording)
             let samples = try AudioConvert.loadAsWhisperSamples(url: audioURL)
             let durationSeconds = Double(samples.count) / Double(WhisperAudioFormat.sampleRate)
@@ -480,7 +545,7 @@ final class TranscriptionService: ObservableObject {
                 }
             }()
 
-            async let transcribeTask = engine.transcribe(
+            async let transcribeTask = activeEngine.transcribe(
                 samples: samples,
                 language: working.language,
                 // Batch path: imported files / post-record full-WAV

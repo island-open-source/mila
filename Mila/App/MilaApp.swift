@@ -218,6 +218,7 @@ struct MilaApp: App {
     @StateObject private var llmSettings: LLMSettings
     @StateObject private var postRecording: PostRecordingCoordinator
     @StateObject private var diarizationSettings: DiarizationSettings
+    @StateObject private var remoteTranscriptionSettings: RemoteTranscriptionSettings
     @StateObject private var meetingDetectionSettings: MeetingDetectionSettings
     @StateObject private var meetingDetector: MeetingDetector
     @StateObject private var meetingPrompt: MeetingPromptCoordinator
@@ -273,7 +274,14 @@ struct MilaApp: App {
             UserDefaults.standard.set(true, forKey: diarForceOffKey)
         }
         let diarSettings = DiarizationSettings(defaultEnabledIfUnset: false)
-        let svc = TranscriptionService(store: store, modelManager: mgr, diarizationSettings: diarSettings)
+        // Remote transcription backend (opt-in, off by default). Constructed
+        // here so the same instance backs both the Settings UI and the
+        // transcription router.
+        let remoteSettings = RemoteTranscriptionSettings()
+        let svc = TranscriptionService(store: store,
+                                       modelManager: mgr,
+                                       diarizationSettings: diarSettings,
+                                       remoteSettings: remoteSettings)
         let session = RecordingSession()
         let langSettings = RecordingLanguageSettings()
         let audioSettings = AudioInputSettings()
@@ -420,6 +428,7 @@ struct MilaApp: App {
         _modelManager = StateObject(wrappedValue: mgr)
         _transcription = StateObject(wrappedValue: svc)
         _diarizationSettings = StateObject(wrappedValue: diarSettings)
+        _remoteTranscriptionSettings = StateObject(wrappedValue: remoteSettings)
         _session = StateObject(wrappedValue: session)
         _actions = StateObject(wrappedValue: actions)
         _hotkeySettings = StateObject(wrappedValue: hotkeys)
@@ -461,6 +470,7 @@ struct MilaApp: App {
                 .environmentObject(llmSettings)
                 .environmentObject(postRecording)
                 .environmentObject(diarizationSettings)
+                .environmentObject(remoteTranscriptionSettings)
                 .environmentObject(liveAISettings)
                 .environmentObject(liveTranscriber)
                 .environmentObject(liveSpeakerDiarizer)
@@ -531,6 +541,7 @@ struct MilaApp: App {
                 .environmentObject(actions)
                 .environmentObject(llmSettings)
                 .environmentObject(diarizationSettings)
+                .environmentObject(remoteTranscriptionSettings)
                 .environmentObject(meetingDetectionSettings)
                 .environmentObject(liveAISettings)
         }
