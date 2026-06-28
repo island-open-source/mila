@@ -15,7 +15,7 @@ Mila's bundle identifier is **`io.island.whisper.IslandWhisper`** (Island.io ori
 
 1. **Back up recordings BEFORE deleting anything.** Copy `Recordings/` + `recordings.json` to a safe location outside Application Support (e.g. `~/Desktop/Mila-Recordings-Backup-<date>`). Verify file counts match before proceeding.
 2. **Use `trash`, never `rm`.** Every removal must be reversible.
-3. **Keep-by-default items are NOT deleted unless the user says so.** You MUST ASK the user about each one (see below). Default = keep.
+3. **Keep-by-default items are NOT deleted unless the user says so.** You MUST ASK the user about each one (see below). Default = keep. This includes the **settings/preferences plist** — never wipe the user's configuration as part of a routine uninstall; preserving it means a reinstall comes back with the same model, language, and settings.
 4. **Never touch the source repo** at `~/ClonedProjects/mila` — only its `build/` output is an app artifact.
 
 ## What is what (map before you touch)
@@ -28,8 +28,8 @@ Mila's bundle identifier is **`io.island.whisper.IslandWhisper`** (Island.io ori
 | `~/Library/Application Support/Mila/torch-site-packages/` (~444 MB) | Regenerable (Python runtime, re-installed) | **Keep — ASK before deleting** |
 | App bundle in `/Applications/Mila.app` | App | Remove |
 | Repo `build/` + `~/Library/Developer/Xcode/DerivedData/Mila-*` | Build artifacts (Dock dev build lives here) | Remove |
-| `~/Library/Preferences/io.island.whisper.IslandWhisper.plist` | App prefs / UserDefaults | Remove |
-| `~/Library/Caches/io.island.whisper.IslandWhisper` | Cache | Remove |
+| `~/Library/Preferences/io.island.whisper.IslandWhisper.plist` | **App settings / UserDefaults** (selected model, language, diarization, LLM config, window state) | **Keep — ASK before deleting** |
+| `~/Library/Caches/io.island.whisper.IslandWhisper` | Cache (no user settings) | Remove |
 | `~/Library/HTTPStorages/io.island.whisper.IslandWhisper` | HTTP cache | Remove |
 | `~/Library/WebKit/io.island.whisper.IslandWhisper` | WebKit data | Remove |
 | Dock tile pointing at any `Mila.app` | Dock entry | Remove |
@@ -43,6 +43,8 @@ Before removing the regenerable assets, ask the user explicitly. Default to KEEP
 > "Mila keeps ~7.2 GB of regenerable data — `Models/` (6.8 GB whisper weights) and `torch-site-packages/` (444 MB Python runtime). Your recordings + `recordings.json` are kept either way. Delete the regenerable data to reclaim space, or keep it so a future reinstall is instant?"
 
 Only delete `Models/` / `torch-site-packages/` if the user chooses to reclaim the space.
+
+**Settings/preferences are also keep-by-default.** Do NOT delete the preferences plist as part of a routine uninstall — it holds the user's configuration (selected model, language, diarization, LLM settings). Only delete it if the user explicitly asks for a **full reset / wipe everything**. If they do, also run `defaults delete io.island.whisper.IslandWhisper` + `killall cfprefsd`, because `cfprefsd` caches prefs in memory and will rewrite the plist on next launch otherwise.
 
 ## Procedure
 
@@ -67,18 +69,26 @@ trash /Applications/Mila.app 2>/dev/null || true
 trash "$HOME/ClonedProjects/mila/build" 2>/dev/null || true       # only the build/ output, NOT the repo
 for d in "$HOME/Library/Developer/Xcode/DerivedData/"Mila-*; do [ -d "$d" ] && trash "$d"; done
 
-# 4. Remove system footprint (bundle id, NOT "Mila")
+# 4. Remove system footprint (bundle id, NOT "Mila").
+#    NOTE: the Preferences plist is intentionally EXCLUDED here — it holds the
+#    user's settings/configuration and is keep-by-default. Caches/HTTPStorages/
+#    WebKit hold no settings and are safe to remove.
 BID="io.island.whisper.IslandWhisper"
 for p in \
-  "$HOME/Library/Preferences/$BID.plist" \
   "$HOME/Library/Caches/$BID" \
   "$HOME/Library/HTTPStorages/$BID" \
   "$HOME/Library/WebKit/$BID" ; do
   [ -e "$p" ] && trash "$p"
 done
+# NOTE: also reset cfprefsd's in-memory cache if you DID delete the plist, or it
+# may be rewritten on next launch: `defaults delete $BID` + `killall cfprefsd`.
 
-# 5. (ONLY IF USER OPTED IN) reclaim regenerable data
+# 5. (ONLY IF USER EXPLICITLY OPTED IN) reclaim regenerable data
 # trash "$SRC/Models" "$SRC/torch-site-packages"
+
+# 6. (ONLY IF USER WANTS A FULL RESET, incl. settings) remove preferences
+# trash "$HOME/Library/Preferences/$BID.plist"
+# defaults delete "$BID" 2>/dev/null; killall cfprefsd 2>/dev/null
 ```
 
 ### Remove the Dock tile
@@ -120,4 +130,5 @@ ls "$HOME/Library/Application Support/Mila/Recordings" | wc -l
 - **Forgetting `recordings.json`.** Backing up `Recordings/` without the index leaves a reinstall with an empty library.
 - **Using `rm`.** Always `trash` so the user can recover.
 - **Deleting `Models/`/`torch-site-packages/` without asking.** These are keep-by-default; deleting them forces multi-GB re-downloads on reinstall.
+- **Wiping the preferences plist on a routine uninstall.** That destroys the user's settings (model, language, diarization, LLM config). Keep it unless the user explicitly wants a full reset — and if they do, clear `cfprefsd` too or it gets rewritten.
 - **Trashing the source repo.** Only `build/` inside `~/ClonedProjects/mila` is an artifact; the rest is source.
