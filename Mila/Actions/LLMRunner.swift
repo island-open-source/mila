@@ -8,7 +8,7 @@ enum LLMRunnerError: LocalizedError {
     case executableNotFound(String)
     case launchFailed(Error)
     case nonZeroExit(code: Int32, stderr: String)
-    case timedOut
+    case timedOut(seconds: Int)
     case emptyOutput
     case cancelled
 
@@ -23,8 +23,8 @@ enum LLMRunnerError: LocalizedError {
         case .nonZeroExit(let code, let stderr):
             let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             return "LLM CLI exited with status \(code). \(trimmed)"
-        case .timedOut:
-            return "LLM CLI did not respond within the timeout."
+        case .timedOut(let seconds):
+            return "LLM CLI did not respond within \(seconds)s. If it's running an agentic task (e.g. calendar lookup), raise the timeout in Settings → LLM."
         case .emptyOutput:
             return "LLM CLI returned no output. Check the prompt or your CLI's auth."
         case .cancelled:
@@ -259,7 +259,7 @@ enum LLMRunner {
         if runningGroup.wait(timeout: deadline) == .timedOut {
             process.terminate()
             _ = group.wait(timeout: .now() + 1)
-            throw LLMRunnerError.timedOut
+            throw LLMRunnerError.timedOut(seconds: Int(timeout.rounded(.up)))
         }
         group.wait()
 

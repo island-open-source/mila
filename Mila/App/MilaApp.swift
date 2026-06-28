@@ -385,8 +385,14 @@ struct MilaApp: App {
         // summary referring to the previous transcript; we force-
         // regenerate so the user doesn't end up with a stale summary
         // that disagrees with what the segments now say.
-        svc.onTranscriptionCompleted = { [weak summarizer] rec, wasRetranscription in
+        svc.onTranscriptionCompleted = { [weak summarizer, weak llm] rec, wasRetranscription in
             if wasRetranscription {
+                // `regenerate` bypasses the "already has a summary" gate by
+                // design (it's also the manual on-demand path), so it does
+                // NOT consult `summaryEnabled` itself. Guard the AUTOMATIC
+                // re-transcription trigger here so a transcript-only user
+                // doesn't get a summary regenerated behind their back.
+                guard llm?.summaryEnabled ?? true else { return }
                 summarizer?.regenerate(rec)
             } else {
                 summarizer?.summarizeIfNeeded(rec)

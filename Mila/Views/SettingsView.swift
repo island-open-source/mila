@@ -476,6 +476,10 @@ private struct LLMSettingsTab: View {
                 header
                 toolPicker
                 Divider()
+                summarySection
+                Divider()
+                timeoutSection
+                Divider()
                 namePromptSection
                 Divider()
                 actionPromptSection
@@ -511,6 +515,41 @@ private struct LLMSettingsTab: View {
             }
             .font(.callout)
             Text("Leave blank to look up the binary on $PATH. Set this if `claude` / `cursor-agent` lives somewhere a GUI app won't see by default (e.g. ~/.local/bin, an asdf shim).")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var summarySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Automatically summarize recordings", isOn: $settings.summaryEnabled)
+                .toggleStyle(.switch)
+                .accessibilityIdentifier("llm.summary.enabled.toggle")
+            Text("When on, Mila runs a one-shot LLM pass after every recording finishes and stores the result as the recording's AI Overview. Turn this off to keep Mila transcript-only. Existing summaries are kept, and any recording that still has one can be refreshed from its right-click \u{201C}Regenerate summary\u{201D} action.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var timeoutSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("CLI timeout").frame(width: 100, alignment: .leading)
+                Stepper(value: $settings.cliTimeout, in: 30...900, step: 30) {
+                    EmptyView()
+                }
+                Text("\(Int(settings.cliTimeout))s")
+                    .monospacedDigit()
+                    .frame(width: 44, alignment: .trailing)
+                Button("Reset") { settings.cliTimeout = 300 }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .font(.callout)
+            }
+            .font(.callout)
+            Text("Maximum time Mila waits for a CLI response before giving up. Applies to title generation, auto-summary, and the Send-action button. Raise this if your prompt uses agentic tools (e.g. calendar lookup) that need extra time to complete.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

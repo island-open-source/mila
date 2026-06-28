@@ -441,7 +441,8 @@ struct RenameRecordingSheet: View {
                               prompt: prompt,
                               transcript: transcriptSnapshot,
                               summary: summarySnapshot,
-                              executableOverride: executableOverride)
+                              executableOverride: executableOverride,
+                              cliTimeout: llm.cliTimeout)
     }
 
     private func fetchNameFromLLM(auto: Bool = false) async {
@@ -450,15 +451,12 @@ struct RenameRecordingSheet: View {
         if auto { didAutoSuggest = true }
         defer { isFetchingName = false }
         do {
-            // Foreground suggest gets a tighter timeout (90s) so a hung CLI
-            // doesn't pin the sheet for 5 minutes. Background "Send" uses
-            // the full 5-min default.
             let suggestion = try await LLMRunner.run(
                 tool: llm.tool,
                 prompt: llm.namePrompt,
                 transcript: transcript,
                 executablePathOverride: llm.executablePath.isEmpty ? nil : llm.executablePath,
-                timeout: 90
+                timeout: llm.cliTimeout
             )
             let cleaned = suggestion
                 .trimmingCharacters(in: .whitespacesAndNewlines)

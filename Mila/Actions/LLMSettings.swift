@@ -136,6 +136,31 @@ final class LLMSettings: ObservableObject {
         didSet { defaults.set(postActionPrompt, forKey: Keys.actionPrompt) }
     }
 
+    /// Maximum wall-clock seconds Mila allows a post-recording LLM call to
+    /// run before killing the subprocess. Applies to title generation, the
+    /// auto-summary, and the Send-action button. Live AI's per-tick timeouts
+    /// are tuned separately and are not affected by this setting.
+    @Published var cliTimeout: TimeInterval {
+        didSet {
+            guard cliTimeout != oldValue else { return }
+            defaults.set(cliTimeout, forKey: Keys.cliTimeout)
+        }
+    }
+
+    /// Master switch for the AUTOMATIC post-recording summary
+    /// (`RecordingSummarizer`). When off, no summary is generated when a
+    /// recording finishes, on launch backfill, or on re-transcription —
+    /// the app behaves as a transcript-only tool. The explicit
+    /// "Regenerate summary" affordance still works on demand; this only
+    /// governs the automatic path.
+    ///
+    /// Defaults to ON (see init) so existing users keep their summaries
+    /// unless they opt out. Surfaced in Settings → LLM next to the name /
+    /// action toggles, which is where users expect to find it.
+    @Published var summaryEnabled: Bool {
+        didSet { defaults.set(summaryEnabled, forKey: Keys.summaryEnabled) }
+    }
+
     /// Convenience the UI uses to decide whether to surface the rename /
     /// run-action buttons at all.
     var isConfigured: Bool { tool != .none }
@@ -151,6 +176,11 @@ final class LLMSettings: ObservableObject {
         self.namePrompt = defaults.string(forKey: Keys.namePrompt) ?? Self.defaultNamePrompt
         self.postActionEnabled = defaults.bool(forKey: Keys.actionEnabled)
         self.postActionPrompt = defaults.string(forKey: Keys.actionPrompt) ?? Self.defaultActionPrompt
+        // Default-on: a bare `defaults.bool` would read false for users who
+        // have never seen this key, silently disabling summaries for
+        // everyone on upgrade. Treat "key absent" as true.
+        self.summaryEnabled = (defaults.object(forKey: Keys.summaryEnabled) as? Bool) ?? true
+        self.cliTimeout = (defaults.object(forKey: Keys.cliTimeout) as? Double) ?? 300
     }
 
     /// Default name prompt is deliberately *tool-free*. The previous default
@@ -183,5 +213,7 @@ final class LLMSettings: ObservableObject {
         static let namePrompt = "llm.name.prompt"
         static let actionEnabled = "llm.action.enabled"
         static let actionPrompt = "llm.action.prompt"
+        static let summaryEnabled = "llm.summary.enabled"
+        static let cliTimeout = "llm.cli.timeout"
     }
 }
