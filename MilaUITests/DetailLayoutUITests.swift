@@ -28,6 +28,26 @@ final class DetailLayoutUITests: XCTestCase {
         return app
     }
 
+    /// Poll for the first of `identifiers` to exist, returning it (or nil
+    /// on timeout). Unlike chaining `waitForExistence` per element, this
+    /// races several candidates at once — used where the same target is
+    /// reachable under more than one accessibility id depending on a
+    /// non-deterministic UI state on the CI runner.
+    private func firstExisting(in app: XCUIApplication,
+                               identifiers: [String],
+                               timeout: TimeInterval) -> XCUIElement? {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            for id in identifiers {
+                let el = app.descendants(matching: .any)
+                    .matching(identifier: id).firstMatch
+                if el.exists { return el }
+            }
+            usleep(200_000)  // 0.2s between polls
+        } while Date() < deadline
+        return nil
+    }
+
     /// Attach a PNG screenshot to the test result so CI artifacts
     /// include a visual record AND write a copy to
     /// `$MILA_UI_SCREENSHOTS_DIR` (or `/tmp/mila-ui-screenshots/` by
@@ -67,7 +87,7 @@ final class DetailLayoutUITests: XCTestCase {
                       "Sidebar row exists in the tree but isn't on-screen — likely scrolled out.")
     }
 
-    func test_recording_detail_renders_within_window_bounds() {
+    func test_recording_detail_renders_within_window_bounds() throws {
         let app = launchApp()
         attachScreenshot(app, name: "01-home-on-launch")
 
@@ -79,11 +99,31 @@ final class DetailLayoutUITests: XCTestCase {
         folder.click()
         attachScreenshot(app, name: "02-all-transcriptions-list")
 
-        let row = app.descendants(matching: .any)
-            .matching(identifier: "history.row.Seed Recording").firstMatch
-        XCTAssertTrue(row.waitForExistence(timeout: 5),
-                      "Seeded recording row not in the list")
-        row.click()
+        // The seeded recording is reachable two ways, and which one
+        // appears is non-deterministic on the macOS-26 CI runner:
+        //   * folder *selected*  → HistoryListView in the detail pane,
+        //     row id `history.row.Seed Recording`
+        //   * folder *expanded*  → inline child in the sidebar,
+        //     row id `sidebar.recording.Seed Recording`
+        // A single click on the folder row lands on one or the other
+        // (List selection vs. disclosure toggle). Both tags drive
+        // navigation to the same RecordingDetailView, so accept whichever
+        // surfaces rather than assuming the history-list path (the latter
+        // assumption flaked this test on CI — see PR #40).
+        let recordingIDs = ["history.row.Seed Recording",
+                            "sidebar.recording.Seed Recording"]
+        var row = firstExisting(in: app, identifiers: recordingIDs, timeout: 8)
+        if row == nil {
+            // The click neither selected nor expanded the folder — force
+            // the disclosure open and look for the inline child row.
+            let disclosure = app.descendants(matching: .any)
+                .matching(identifier: "sidebar.folder.default.disclosure").firstMatch
+            if disclosure.exists { disclosure.click() }
+            row = firstExisting(in: app, identifiers: recordingIDs, timeout: 5)
+        }
+        let recordingRow = try XCTUnwrap(
+            row, "Seeded recording not reachable via the history list or the sidebar")
+        recordingRow.click()
 
         // Detail-view title label should exist (the row click landed on
         // RecordingDetailView).
