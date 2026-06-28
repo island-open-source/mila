@@ -349,11 +349,13 @@ final class LLMRunnerTests: XCTestCase {
     }
 
     func test_run_appends_extra_args_after_prompt() async throws {
-        // Echo every argument on its own line so we can assert the extra
-        // args were forwarded to the child after the standard ones.
+        // Emit each argument NUL-delimited so we can reconstruct argv exactly
+        // and assert the extra args are the *trailing* tokens — the override
+        // behaviour (a user --model wins) depends on them coming last, not
+        // just being present.
         let script = makeScript("""
             #!/bin/sh
-            for a in "$@"; do printf '%s\\n' "$a"; done
+            for a in "$@"; do printf '%s\\0' "$a"; done
             """)
         defer { try? FileManager.default.removeItem(at: script) }
         let out = try await LLMRunner.run(tool: .claude,
@@ -362,8 +364,29 @@ final class LLMRunnerTests: XCTestCase {
                                           executablePathOverride: script.path,
                                           extraArgs: ["--model", "some-model"],
                                           timeout: 30)
-        XCTAssertTrue(out.contains("--model"), "extra flag missing: \(out)")
-        XCTAssertTrue(out.contains("some-model"), "extra value missing: \(out)")
+        let argv = out.split(separator: "\0").map(String.init)
+        XCTAssertEqual(Array(argv.suffix(2)), ["--model", "some-model"],
+                       "extra args must be appended after standard args: \(argv)")
+    }
+
+    func test_diagnose_reports_timeout_without_throwing() async throws {
+        // Script ignores args and sleeps past the 1s timeout. diagnose maps
+        // the timeout into the result fields the panel renders, never throws.
+        let script = makeScript("""
+            #!/bin/sh
+            sleep 5
+            """)
+        defer { try? FileManager.default.removeItem(at: script) }
+        let result = await LLMRunner.diagnose(tool: .claude,
+                                              prompt: "x",
+                                              transcript: "y",
+                                              executablePathOverride: script.path,
+                                              timeout: 1)
+        XCTAssertFalse(result.succeeded)
+        XCTAssertTrue(result.didLaunch)
+        XCTAssertTrue(result.timedOut)
+        XCTAssertEqual(result.exitCode, -1)
+        XCTAssertNil(result.setupError)
     }
 
     func test_diagnose_appends_extra_args_to_command() async {
