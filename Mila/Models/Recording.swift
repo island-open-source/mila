@@ -121,6 +121,15 @@ struct Recording: Identifiable, Codable, Hashable {
         (audioFileName as NSString).deletingPathExtension + ".summary.txt"
     }
 
+    /// File name (relative to recordings directory) of the sidecar `.srt`
+    /// subtitle file auto-written after transcription (see
+    /// `TranscriptExporter.writeSRT(for:in:)`). Same derive-from-audio
+    /// convention as the other sidecars so deleting a recording can clean
+    /// up `Foo.srt` alongside `Foo.wav`/`Foo.txt`/`Foo.summary.txt`.
+    var subtitleFileName: String {
+        (audioFileName as NSString).deletingPathExtension + ".srt"
+    }
+
     private enum CodingKeys: String, CodingKey {
         case id, title, createdAt, duration, source, audioFileName,
              status, language, modelName, segments, deletedAt, folder, appName,

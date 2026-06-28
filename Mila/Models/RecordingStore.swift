@@ -276,6 +276,13 @@ final class RecordingStore: ObservableObject {
         recordingsDirectory.appendingPathComponent(recording.summaryFileName)
     }
 
+    /// Path of the per-recording `.srt` subtitle sidecar auto-written after
+    /// transcription. May be absent (recording still pending, or it had no
+    /// segments) — callers should treat absence as "nothing to remove".
+    func subtitleURL(for recording: Recording) -> URL {
+        recordingsDirectory.appendingPathComponent(recording.subtitleFileName)
+    }
+
     func freshAudioURL(suggestedName: String? = nil) -> URL {
         let stamp = ISO8601DateFormatter().string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
@@ -389,12 +396,16 @@ final class RecordingStore: ObservableObject {
         persist()
     }
 
-    /// Remove the metadata + audio file from disk.
+    /// Remove the metadata + every on-disk file for a recording: the audio
+    /// plus all sidecars (`.txt` transcript, `.summary.txt`, `.srt`
+    /// subtitles). Missing files are ignored — each is best-effort so one
+    /// absent sidecar doesn't strand the others.
     func permanentlyDelete(_ recording: Recording) {
         recordings.removeAll { $0.id == recording.id }
         try? fileManager.removeItem(at: audioURL(for: recording))
         try? fileManager.removeItem(at: transcriptURL(for: recording))
         try? fileManager.removeItem(at: summaryURL(for: recording))
+        try? fileManager.removeItem(at: subtitleURL(for: recording))
         persist()
     }
 

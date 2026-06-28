@@ -332,6 +332,28 @@ final class RecordingStoreTests: XCTestCase {
                        "permanentlyDelete must remove the summary sidecar too")
     }
 
+    func test_permanently_delete_removes_subtitle_sidecar() throws {
+        let store = RecordingStore(rootDirectory: tempRoot)
+        let rec = Recording(title: "S", source: .microphone, audioFileName: "s.wav")
+        store.add(rec)
+        // The .srt sidecar is written post-transcription by TranscriptExporter,
+        // not by add() — simulate it landing next to the audio.
+        let srt = store.subtitleURL(for: rec)
+        try "1\n00:00:00,000 --> 00:00:01,000\nhi\n".write(to: srt, atomically: true, encoding: .utf8)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: srt.path))
+
+        store.permanentlyDelete(rec)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: srt.path),
+                       "permanentlyDelete must remove the .srt subtitle sidecar too")
+    }
+
+    func test_subtitle_filename_derived_from_audio_filename() {
+        let rec = Recording(title: "X",
+                            source: .microphone,
+                            audioFileName: "Voice Memo 2024-01-01.m4a")
+        XCTAssertEqual(rec.subtitleFileName, "Voice Memo 2024-01-01.srt")
+    }
+
     func test_summary_filename_derived_from_audio_filename() {
         let rec = Recording(title: "X",
                             source: .microphone,
