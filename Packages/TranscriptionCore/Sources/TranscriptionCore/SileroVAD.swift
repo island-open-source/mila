@@ -38,7 +38,10 @@ public actor SileroVAD {
         case modelLoadFailed(String)
         public var errorDescription: String? {
             switch self {
-            case .modelLoadFailed(let path): return "Failed to load VAD model at \(path)"
+            case .modelLoadFailed(let path):
+                // Surface only the filename — the absolute path leaks the
+                // user's home dir / checkout location into logs.
+                return "Failed to load VAD model \(URL(fileURLWithPath: path).lastPathComponent)"
             }
         }
     }
@@ -62,7 +65,7 @@ public actor SileroVAD {
             throw Error.modelLoadFailed(modelPath)
         }
         self.vctx = ctx
-        sileroNotice("SileroVAD loaded from \(modelPath)")
+        sileroNotice("SileroVAD loaded from \(URL(fileURLWithPath: modelPath).lastPathComponent)")
     }
 
     deinit {

@@ -38,8 +38,9 @@ final class SileroVADTests: XCTestCase {
     }
 
     private func makeVAD() throws -> SileroVAD {
-        try XCTSkipUnless(FileManager.default.fileExists(atPath: Self.modelPath),
-                          "Silero model not found at \(Self.modelPath)")
+        // The model is committed in the repo and the feature depends on it
+        // being bundled — a missing file is a real regression, not a reason
+        // to skip. Let `SileroVAD.init` throw and fail the test loudly.
         return try SileroVAD(modelPath: Self.modelPath)
     }
 
@@ -76,5 +77,40 @@ final class SileroVADTests: XCTestCase {
         let noise = (0..<(Int(WhisperAudioFormat.sampleRate) * 3)).map { _ in next() }
         let hasSpeech = await vad.containsSpeech(noise)
         XCTAssertFalse(hasSpeech, "loud white noise must not register as speech")
+    }
+
+    /// Regression for state bleed across calls on a SHARED context (the
+    /// production usage — `LiveTranscriber` holds one `SileroVAD` and gates
+    /// every utterance through it). whisper.cpp v1.8.4 only exposes
+    /// `whisper_vad_detect_speech`, which resets the Silero LSTM state on
+    /// every call (the `_no_reset` streaming variant landed upstream
+    /// later), so `whisper_vad_segments_from_samples` starts clean each
+    /// time. This alternates speech → silence → speech → noise on one
+    /// instance and asserts each verdict matches its own input — i.e. a
+    /// prior speech utterance never bleeds a false-positive into the
+    /// following silence/noise call.
+    func test_consecutive_calls_do_not_bleed_state() async throws {
+        let vad = try makeVAD()
+        let speech = try WAVReader.loadSamples(
+            url: Self.fixturesDir.appendingPathComponent("en_hello_world.wav"))
+        let silence = [Float](repeating: 0, count: Int(WhisperAudioFormat.sampleRate) * 2)
+
+        var state: UInt64 = 0xD1B54A32D192ED03
+        func noiseSample() -> Float {
+            state ^= state << 13; state ^= state >> 7; state ^= state << 17
+            return Float(Double(state % 20001) / 10000.0 - 1.0) * 0.3
+        }
+        let noise = (0..<(Int(WhisperAudioFormat.sampleRate) * 2)).map { _ in noiseSample() }
+
+        // Speech right before silence/noise is the case most likely to
+        // expose a stale-state false positive.
+        let speech1 = await vad.containsSpeech(speech)
+        let silenceAfterSpeech = await vad.containsSpeech(silence)
+        let speech2 = await vad.containsSpeech(speech)
+        let noiseAfterSpeech = await vad.containsSpeech(noise)
+        XCTAssertTrue(speech1, "speech call 1")
+        XCTAssertFalse(silenceAfterSpeech, "silence after speech must stay silent")
+        XCTAssertTrue(speech2, "speech call 2")
+        XCTAssertFalse(noiseAfterSpeech, "noise after speech must stay non-speech")
     }
 }
