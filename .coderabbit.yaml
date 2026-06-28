@@ -1,0 +1,54 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit config — https://docs.coderabbit.ai/getting-started/configure-coderabbit
+# Free Pro features apply automatically to this public repo.
+language: en-US
+early_access: false
+
+reviews:
+  # "assertive" surfaces more findings (closer to a Bugbot-style firehose).
+  # Switch to "chill" if the volume gets noisy.
+  profile: assertive
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+    # Review PRs targeting these branches.
+    base_branches:
+      - main
+
+  # Skip generated / vendored / binary artifacts so reviews stay signal-rich.
+  path_filters:
+    - "!**/*.xcodeproj/**"
+    - "!Mila/Resources/PythonRuntime/**"
+    - "!Mila/Resources/DiarizationModels/**"
+    - "!Mila/Resources/**/*.bin"
+    - "!Packages/TranscriptionCore/Fixtures/**"
+    - "!**/*.wav"
+    - "!**/Assets.xcassets/**"
+    - "!**/*.pbxproj"
+
+  # Domain context so the reviewer judges the right things for this codebase.
+  path_instructions:
+    - path: "**/*.swift"
+      instructions: >-
+        Swift 5.10 / SwiftUI macOS app (min macOS 14). Prioritise: Swift
+        concurrency correctness (@MainActor / actor isolation, Task ordering
+        and cancellation, data races, Sendable); retain cycles in escaping
+        closures (require [weak self] where a stored Task/closure outlives
+        the call); force-unwraps and force-tries on fallible paths; and
+        correct stdout/stderr handling + pipe-drain ordering for any Process
+        / Python subprocess integration (a known deadlock class in this repo).
+        Match the surrounding code's style and comment density.
+    - path: "Packages/TranscriptionCore/**"
+      instructions: >-
+        Cross-platform Swift package wrapping whisper.cpp. Flag any API that
+        would break the Linux build (Apple-only imports must be #if guarded)
+        and any unsafe pointer / C-bridging lifetime issue.
+
+chat:
+  auto_reply: true
