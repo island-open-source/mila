@@ -10,21 +10,27 @@ enum FileTranscriber {
 
     static func importFile(at sourceURL: URL,
                            into store: RecordingStore,
-                           language: RecordingLanguage = .hebrew) async throws -> Recording {
+                           language: RecordingLanguage = .hebrew,
+                           source: RecordingSource = .systemAudio,
+                           title titleOverride: String? = nil,
+                           createdAt: Date? = nil,
+                           voiceMemoUniqueID: String? = nil) async throws -> Recording {
         let didStart = sourceURL.startAccessingSecurityScopedResource()
         defer { if didStart { sourceURL.stopAccessingSecurityScopedResource() } }
 
-        let title = sourceURL.deletingPathExtension().lastPathComponent
+        let title = titleOverride ?? sourceURL.deletingPathExtension().lastPathComponent
         let destURL = store.freshAudioURL(suggestedName: title)
 
         let duration = try await reencode(source: sourceURL, destination: destURL)
 
         let recording = Recording(
             title: title,
+            createdAt: createdAt ?? Date(),
             duration: duration,
-            source: .systemAudio, // imported file: counts as "from app/system"
+            source: source,
             audioFileName: destURL.lastPathComponent,
-            language: language.rawValue
+            language: language.rawValue,
+            voiceMemoUniqueID: voiceMemoUniqueID
         )
         store.add(recording)
         return recording

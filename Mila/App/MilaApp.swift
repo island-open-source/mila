@@ -231,6 +231,8 @@ struct MilaApp: App {
     /// SwiftUI redraws and so its in-flight task table survives
     /// alongside everything else.
     @StateObject private var recordingSummarizer: RecordingSummarizer
+    @StateObject private var voiceMemosSettings: VoiceMemosSettings
+    @StateObject private var voiceMemosImporter: VoiceMemosImporter
     @StateObject private var updater = UpdaterViewModel()
 
     init() {
@@ -436,6 +438,17 @@ struct MilaApp: App {
         _liveSpeakerDiarizer = StateObject(wrappedValue: liveDiar)
         _liveAISession = StateObject(wrappedValue: liveSession)
         _recordingSummarizer = StateObject(wrappedValue: summarizer)
+        // Voice Memos (iPhone) folder integration. Settings are opt-in and
+        // default-off; the importer wires up its FSEvents watcher + initial
+        // backfill from its `start()` launch task (below), so constructing
+        // it here is cheap (no DB / filesystem work in init).
+        let vmSettings = VoiceMemosSettings()
+        let vmImporter = VoiceMemosImporter(store: store,
+                                            transcription: svc,
+                                            settings: vmSettings,
+                                            languageSettings: langSettings)
+        _voiceMemosSettings = StateObject(wrappedValue: vmSettings)
+        _voiceMemosImporter = StateObject(wrappedValue: vmImporter)
         let dictationController = DictationController(store: store,
                                                       transcription: svc,
                                                       hotkeySettings: hotkeys,
@@ -481,8 +494,11 @@ struct MilaApp: App {
                 .task { await injectFixtureWavIfRequested() }
                 .task { await runFinalizeRegressionIfRequested() }
                 .task { recordingSummarizer.backfillIfNeeded() }
+                .task { voiceMemosImporter.start() }
                 .environmentObject(recordingSummarizer)
                 .environmentObject(meetingDetectionSettings)
+                .environmentObject(voiceMemosSettings)
+                .environmentObject(voiceMemosImporter)
         }
         .commands {
             CommandGroup(after: .appInfo) {
@@ -533,6 +549,8 @@ struct MilaApp: App {
                 .environmentObject(diarizationSettings)
                 .environmentObject(meetingDetectionSettings)
                 .environmentObject(liveAISettings)
+                .environmentObject(voiceMemosSettings)
+                .environmentObject(voiceMemosImporter)
         }
     }
 

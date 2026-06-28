@@ -5,6 +5,11 @@ enum RecordingSource: String, Codable, CaseIterable, Identifiable {
     case microphone
     case systemAudio
     case meeting
+    /// Imported from the iPhone's Voice Memos app via the iCloud-synced
+    /// folder on this Mac. Distinct from Mila's own mic capture (which is
+    /// `.microphone`) so the origin is visible in the UI and so the sync
+    /// importer can dedup these against `Recording.voiceMemoUniqueID`.
+    case voiceMemo
 
     var id: String { rawValue }
 
@@ -13,6 +18,7 @@ enum RecordingSource: String, Codable, CaseIterable, Identifiable {
         case .microphone: return "Microphone"
         case .systemAudio: return "System audio"
         case .meeting: return "Meeting (mic + system)"
+        case .voiceMemo: return "Voice Memo"
         }
     }
 
@@ -21,6 +27,7 @@ enum RecordingSource: String, Codable, CaseIterable, Identifiable {
         case .microphone: return "mic.fill"
         case .systemAudio: return "speaker.wave.3.fill"
         case .meeting: return "person.2.wave.2.fill"
+        case .voiceMemo: return "waveform"
         }
     }
 }
@@ -67,6 +74,13 @@ struct Recording: Identifiable, Codable, Hashable {
     /// nothing (rare — usually means the LLM CLI returned an error).
     var actionItems: [ActionItem]?
 
+    /// Stable per-recording identifier from the iPhone Voice Memos library
+    /// (`ZCLOUDRECORDING.ZUNIQUEID`) when `source == .voiceMemo`. The sync
+    /// importer keys on this to skip recordings it already imported, so a
+    /// rescan or app restart never re-imports the same memo. nil for every
+    /// non-Voice-Memo recording.
+    var voiceMemoUniqueID: String?
+
     init(id: UUID = UUID(),
          title: String,
          createdAt: Date = Date(),
@@ -82,7 +96,8 @@ struct Recording: Identifiable, Codable, Hashable {
          folder: String? = nil,
          appName: String? = nil,
          summary: String? = nil,
-         actionItems: [ActionItem]? = nil) {
+         actionItems: [ActionItem]? = nil,
+         voiceMemoUniqueID: String? = nil) {
         self.id = id
         self.title = title
         self.createdAt = createdAt
@@ -99,6 +114,7 @@ struct Recording: Identifiable, Codable, Hashable {
         self.appName = appName
         self.summary = summary
         self.actionItems = actionItems
+        self.voiceMemoUniqueID = voiceMemoUniqueID
     }
 
     var isTrashed: Bool { deletedAt != nil }
@@ -133,7 +149,7 @@ struct Recording: Identifiable, Codable, Hashable {
     private enum CodingKeys: String, CodingKey {
         case id, title, createdAt, duration, source, audioFileName,
              status, language, modelName, segments, deletedAt, folder, appName,
-             summary, actionItems
+             summary, actionItems, voiceMemoUniqueID
         // `fullText` deliberately excluded — lives in a sidecar .txt file.
         // Legacy records that had it inline are decoded via the custom init.
         case fullText
@@ -156,6 +172,7 @@ struct Recording: Identifiable, Codable, Hashable {
         self.appName = try c.decodeIfPresent(String.self, forKey: .appName)
         self.summary = try c.decodeIfPresent(String.self, forKey: .summary)
         self.actionItems = try c.decodeIfPresent([ActionItem].self, forKey: .actionItems)
+        self.voiceMemoUniqueID = try c.decodeIfPresent(String.self, forKey: .voiceMemoUniqueID)
         // Legacy records still have fullText inline; new records leave it
         // empty here and RecordingStore loads it from the sidecar .txt.
         self.fullText = try c.decodeIfPresent(String.self, forKey: .fullText) ?? ""
@@ -178,6 +195,7 @@ struct Recording: Identifiable, Codable, Hashable {
         try c.encodeIfPresent(appName, forKey: .appName)
         try c.encodeIfPresent(summary, forKey: .summary)
         try c.encodeIfPresent(actionItems, forKey: .actionItems)
+        try c.encodeIfPresent(voiceMemoUniqueID, forKey: .voiceMemoUniqueID)
         // fullText intentionally omitted — sidecar .txt is the source of truth.
     }
 
