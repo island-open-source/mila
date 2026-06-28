@@ -47,7 +47,8 @@ final class QuickActionsControllerTests: XCTestCase {
                                             languageSettings: languageSettings,
                                             postRecording: PostRecordingCoordinator(
                                                 store: store,
-                                                transcription: service))
+                                                transcription: service,
+                                                llm: LLMSettings(defaults: UserDefaults(suiteName: "QuickActionsControllerTests.llm")!)))
     }
 
     override func tearDown() async throws {

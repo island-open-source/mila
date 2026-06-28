@@ -18,9 +18,12 @@ struct RenameRecordingSheet: View {
     @State private var title: String
     @State private var isFetchingName = false
     @State private var llmError: String?
-    /// One-shot guard so the auto-suggest doesn't re-fire every time the
-    /// store publishes (transcript edits, status flips, etc.).
-    @State private var didAutoSuggest = false
+    /// Set once the user types in the title field (or accepts a manual
+    /// Suggest). While false, the field mirrors the recording's stored title
+    /// so a background auto-suggestion that lands after the sheet opened shows
+    /// up here; once the user has expressed a preference we stop mirroring so
+    /// their choice is never clobbered.
+    @State private var userEditedTitle = false
     /// Confirmation gate before the destructive Discard button actually
     /// throws the recording away. Closing the sheet (ESC, X, app quit)
     /// always saves — discarding requires an explicit click + confirm,
@@ -109,22 +112,24 @@ struct RenameRecordingSheet: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Name").font(.callout.weight(.semibold))
                     HStack {
-                        TextField("Recording title", text: $title)
+                        TextField("Recording title", text: titleBinding)
                             .textFieldStyle(.roundedBorder)
                             .onSubmit { save() }
                         if llm.isConfigured && llm.nameGenerationEnabled {
                             Button {
-                                startFetchName(auto: false)
+                                startFetchName()
                             } label: {
-                                if isFetchingName {
+                                if isFetchingName || autoSuggesting {
                                     ProgressView().controlSize(.small)
                                 } else {
                                     Label("Suggest", systemImage: "sparkles")
                                 }
                             }
-                            .disabled(isFetchingName || !transcriptReady)
+                            .disabled(isFetchingName || autoSuggesting || !transcriptReady)
                             .help(transcriptReady
-                                  ? "Ask \(llm.tool.displayName) for a title"
+                                  ? (autoSuggesting
+                                     ? "Suggesting a title…"
+                                     : "Ask \(llm.tool.displayName) for a title")
                                   : "Available once the transcript is ready")
                         }
                     }
@@ -209,8 +214,21 @@ struct RenameRecordingSheet: View {
         // bind ESC to Discard — the whole point of this change is that
         // dismissing the sheet must never throw audio away.
         .onExitCommand { save() }
-        .onAppear { triggerAutoSuggestIfReady() }
-        .onChange(of: liveRecording.status) { _, _ in triggerAutoSuggestIfReady() }
+        // Catch any suggestion that landed in the store between this view's
+        // init (which snapshotted `initialRecording.title`) and `onChange`
+        // being installed — otherwise a Save could write the stale default
+        // back over the stored suggestion.
+        .onAppear {
+            if !userEditedTitle { title = liveRecording.title }
+        }
+        // Mirror a background auto-suggestion into the field as it lands —
+        // but only until the user expresses their own preference. The
+        // coordinator owns the suggestion now (Issue #34): it keeps running
+        // even after the user Saves, writing the title straight to the stored
+        // recording, so the user is never blocked waiting for the LLM.
+        .onChange(of: liveRecording.title) { _, newTitle in
+            if !userEditedTitle { title = newTitle }
+        }
         .confirmationDialog("Discard this recording?",
                             isPresented: $confirmingDiscard,
                             titleVisibility: .visible) {
@@ -223,29 +241,40 @@ struct RenameRecordingSheet: View {
         }
     }
 
-    /// Auto-fire the LLM Suggest call as soon as the transcript is ready,
-    /// gated solely by the Settings toggle. The user does not get a
-    /// per-recording opt-out in the sheet — keeping that preference in one
-    /// place avoids "did I check the box?" confusion.
-    private func triggerAutoSuggestIfReady() {
-        guard llm.isConfigured,
-              llm.nameGenerationEnabled,
-              transcriptReady,
-              !didAutoSuggest,
-              !isFetchingName else { return }
-        startFetchName(auto: true)
+    /// Title field binding that records when the *user* edits the field, so
+    /// the background auto-suggestion (which writes through the store and is
+    /// mirrored via `onChange(of: liveRecording.title)`) never overwrites a
+    /// title the user is typing. Programmatic updates assign `title` directly
+    /// and bypass this setter, so they don't trip the flag.
+    private var titleBinding: Binding<String> {
+        Binding(
+            get: { title },
+            set: { newValue in
+                title = newValue
+                userEditedTitle = true
+            }
+        )
     }
 
-    /// Wrap `fetchNameFromLLM` in a Task tracked by the coordinator so the
-    /// rename-sheet's Cancel button can kill it (the auto-suggest path is
-    /// where users were most surprised that "things keep running" after
-    /// Cancel). Auto-clears its own handle on completion so we don't keep
-    /// dead Task references around.
-    private func startFetchName(auto: Bool) {
+    /// Whether the coordinator's background auto-suggest job is currently
+    /// running for this recording — drives the inline spinner.
+    private var autoSuggesting: Bool {
+        coordinator.autoSuggestingIDs.contains(liveRecording.id)
+    }
+
+    /// Wrap the manual-Suggest `fetchNameFromLLM` in a Task tracked by the
+    /// coordinator so the rename-sheet's Cancel button can kill it. Replaces
+    /// (cancels) any in-flight background auto-suggest for this recording so
+    /// the two don't run two CLIs at once. Auto-clears its own handle on
+    /// completion so we don't keep dead Task references around.
+    private func startFetchName() {
         let recordingID = liveRecording.id
         let task = Task { @MainActor in
-            await fetchNameFromLLM(auto: auto)
-            coordinator.clearLLM(for: recordingID)
+            await fetchNameFromLLM()
+            // Skip the slot cleanup if a newer task replaced (cancelled) us —
+            // otherwise we'd orphan its handle. (Matches the background
+            // auto-suggest path in PostRecordingCoordinator.)
+            if !Task.isCancelled { coordinator.clearLLM(for: recordingID) }
         }
         coordinator.trackLLM(task, for: recordingID)
     }
@@ -445,10 +474,12 @@ struct RenameRecordingSheet: View {
                               cliTimeout: llm.cliTimeout)
     }
 
-    private func fetchNameFromLLM(auto: Bool = false) async {
+    /// Foreground, user-initiated "Suggest" — fills the field so the user can
+    /// review/edit before saving. The hands-off background path lives in
+    /// `PostRecordingCoordinator`; this one stays for the explicit button.
+    private func fetchNameFromLLM() async {
         llmError = nil
         isFetchingName = true
-        if auto { didAutoSuggest = true }
         defer { isFetchingName = false }
         do {
             let suggestion = try await LLMRunner.run(
@@ -458,18 +489,14 @@ struct RenameRecordingSheet: View {
                 executablePathOverride: llm.executablePath.isEmpty ? nil : llm.executablePath,
                 timeout: llm.cliTimeout
             )
-            let cleaned = suggestion
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'`."))
+            let cleaned = PostRecordingCoordinator.cleanedTitle(from: suggestion)
             if cleaned.isEmpty {
                 throw LLMRunnerError.emptyOutput
             }
-            // Take the first line — some CLIs preface or append commentary
-            // even when asked for a bare title. The first non-empty line is
-            // almost always the intended answer.
-            let firstLine = cleaned.split(whereSeparator: \.isNewline)
-                .first.map(String.init) ?? cleaned
-            title = firstLine.trimmingCharacters(in: CharacterSet(charactersIn: "\"'`. "))
+            title = cleaned
+            // The user asked for this title — treat it as their choice so a
+            // later background write to the store doesn't overwrite it.
+            userEditedTitle = true
         } catch LLMRunnerError.cancelled {
             // User clicked Cancel — the sheet is about to be torn down. No
             // banner, no error state.

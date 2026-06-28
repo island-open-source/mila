@@ -35,7 +35,8 @@ final class PostRecordingCoordinatorSendTests: XCTestCase {
             diarizationSettings: DiarizationSettings(defaults: .init(suiteName: diarSuite)!),
             engine: stub
         )
-        coordinator = PostRecordingCoordinator(store: store, transcription: service)
+        coordinator = PostRecordingCoordinator(store: store, transcription: service,
+                                               llm: LLMSettings(defaults: UserDefaults(suiteName: "PostRecordingCoordinatorSendTests.llm")!))
     }
 
     override func tearDown() async throws {

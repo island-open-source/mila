@@ -21,11 +21,17 @@ final class PostRecordingCoordinator: ObservableObject {
     @Published var activityStatus: String?
     @Published var activityIsError: Bool = false
 
+    /// Recordings whose title is currently being suggested by the background
+    /// auto-suggest job. The rename sheet reads this to show a "suggesting…"
+    /// affordance without owning the work itself.
+    @Published private(set) var autoSuggestingIDs: Set<UUID> = []
+
     private let store: RecordingStore
     private let transcription: TranscriptionService
+    private let llm: LLMSettings
 
-    /// LLM work spawned from inside the rename sheet (auto-suggest, manual
-    /// Suggest, Send-to-Claude). Tracked here — not in the sheet's view
+    /// LLM work spawned from inside the rename sheet (manual Suggest) plus
+    /// the background auto-suggest job. Tracked here — not in the sheet's view
     /// state — so the Cancel button can kill it even after the sheet is
     /// torn down, and so the in-flight handle survives the SwiftUI redraws
     /// that would otherwise re-create local `@State`.
@@ -52,9 +58,12 @@ final class PostRecordingCoordinator: ObservableObject {
     /// can still be transcribing minutes after the user walks away.
     var transcriptWaitTimeout: TimeInterval = 600
 
-    init(store: RecordingStore, transcription: TranscriptionService) {
+    init(store: RecordingStore,
+         transcription: TranscriptionService,
+         llm: LLMSettings) {
         self.store = store
         self.transcription = transcription
+        self.llm = llm
     }
 
     /// Open the rename sheet for a freshly-added recording. Called by
@@ -72,6 +81,94 @@ final class PostRecordingCoordinator: ObservableObject {
         if CommandLine.arguments.contains("--ui-test-finalize-regression") { return }
         guard pending == nil else { return }
         pending = recording
+        armAutoSuggestTitle(for: recording)
+    }
+
+    // MARK: - Background auto-suggest title
+
+    /// Kick off background title suggestion for a freshly-added recording.
+    ///
+    /// This is deliberately decoupled from the rename sheet: the LLM CLI can
+    /// take a long time to answer, and the old in-sheet path lost the result
+    /// the moment the user hit Save (the suggestion landed in discarded
+    /// `@State`). Running it here means the user can Save and move on
+    /// immediately — the title is written to the saved recording whenever the
+    /// CLI returns, as long as the user hasn't given it their own title in
+    /// the meantime. (Issue #34.)
+    ///
+    /// The transcript is usually still being finalized at add time, so we
+    /// reuse `awaitTranscript` (the same poller "Send to <LLM>" uses) to wait
+    /// for it before invoking the CLI.
+    private func armAutoSuggestTitle(for recording: Recording) {
+        guard llm.isConfigured, llm.nameGenerationEnabled else { return }
+        let id = recording.id
+        // The default, machine-generated title at add time. We only apply an
+        // AI suggestion later if the recording STILL carries this title —
+        // i.e. the user hasn't renamed it (in the sheet or the list).
+        let baselineTitle = recording.title
+        let tool = llm.tool
+        let prompt = llm.namePrompt
+        let executableOverride = llm.executablePath.isEmpty ? nil : llm.executablePath
+        let cliTimeout = llm.cliTimeout
+        let waitTimeout = transcriptWaitTimeout
+        autoSuggestingIDs.insert(id)
+        let task = Task { @MainActor [weak self] in
+            defer {
+                self?.autoSuggestingIDs.remove(id)
+                // Only relinquish the tracked-task slot if we finished on our
+                // own. If we were cancelled it's because a replacement task
+                // (manual Suggest) or `cancelAndDiscard` took over the slot —
+                // clearing it here would orphan their handle.
+                if !Task.isCancelled { self?.clearLLM(for: id) }
+            }
+            guard let self else { return }
+            guard let transcript = await self.awaitTranscript(for: id,
+                                                              timeout: waitTimeout) else {
+                return  // discarded, timed out, or empty transcript
+            }
+            if Task.isCancelled { return }
+            do {
+                let suggestion = try await LLMRunner.run(
+                    tool: tool,
+                    prompt: prompt,
+                    transcript: transcript,
+                    executablePathOverride: executableOverride,
+                    timeout: cliTimeout
+                )
+                if Task.isCancelled { return }
+                let title = Self.cleanedTitle(from: suggestion)
+                guard !title.isEmpty else { return }
+                self.applyAutoSuggestedTitle(title, to: id, baseline: baselineTitle)
+            } catch {
+                // Best-effort, background work — swallow. (Cancellation fires
+                // here too when the user Discards or manually re-Suggests.)
+            }
+        }
+        trackLLM(task, for: id)
+    }
+
+    /// Apply a background suggestion to the stored recording, but never
+    /// clobber a title the user chose themselves — if the recording's title
+    /// has diverged from the baseline default, the user (or a manual Suggest)
+    /// already named it and wins.
+    private func applyAutoSuggestedTitle(_ title: String, to id: UUID, baseline: String) {
+        guard var recording = store.recordings.first(where: { $0.id == id }),
+              recording.title == baseline,
+              recording.title != title else { return }
+        recording.title = title
+        store.update(recording)
+    }
+
+    /// Extract a bare title from raw CLI output: trim surrounding quotes /
+    /// punctuation and keep only the first non-empty line (some CLIs add
+    /// commentary even when asked for just a title).
+    static func cleanedTitle(from raw: String) -> String {
+        let cleaned = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'`."))
+        let firstLine = cleaned.split(whereSeparator: \.isNewline)
+            .first.map(String.init) ?? cleaned
+        return firstLine.trimmingCharacters(in: CharacterSet(charactersIn: "\"'`. "))
     }
 
     /// Persist a user-supplied title and dismiss. `nil` / blank title means
@@ -239,6 +336,7 @@ final class PostRecordingCoordinator: ObservableObject {
     ///  4. dismiss the sheet
     func cancelAndDiscard() {
         guard let recording = pending else { pending = nil; return }
+        autoSuggestingIDs.remove(recording.id)
         if let task = llmTasks.removeValue(forKey: recording.id) {
             task.cancel()
         }

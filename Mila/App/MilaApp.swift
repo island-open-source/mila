@@ -280,7 +280,7 @@ struct MilaApp: App {
         let inputMonitor = InputLevelMonitor()
         inputMonitor.preferredUID = audioSettings.preferredUID
         let llm = LLMSettings()
-        let coordinator = PostRecordingCoordinator(store: store, transcription: svc)
+        let coordinator = PostRecordingCoordinator(store: store, transcription: svc, llm: llm)
         let actions = QuickActionsController(session: session,
                                              store: store,
                                              transcription: svc,
