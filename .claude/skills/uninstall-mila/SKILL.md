@@ -54,15 +54,20 @@ Only delete `Models/` / `torch-site-packages/` if the user chooses to reclaim th
 mdfind -name "Mila.app" 2>/dev/null
 /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" /Applications/Mila.app/Contents/Info.plist   # -> io.island.whisper.IslandWhisper
 
-# 1. BACK UP user data first (always)
+# 1. BACK UP user data first (always). Fail fast: an incomplete backup must
+#    NEVER let the uninstall proceed.
+set -euo pipefail
 SRC="$HOME/Library/Application Support/Mila"
 DST="$HOME/Desktop/Mila-Recordings-Backup-$(date +%Y-%m-%d)"
 mkdir -p "$DST"
-cp -Rp "$SRC/Recordings" "$DST/" && cp -p "$SRC/recordings.json" "$DST/"
-cp -p "$SRC/folders.json" "$DST/" 2>/dev/null || true   # folder map — may not exist yet (optional)
-# verify counts match before continuing:
+cp -Rp "$SRC/Recordings" "$DST/"
+cp -p "$SRC/recordings.json" "$DST/"
+[[ -f "$SRC/folders.json" ]] && cp -p "$SRC/folders.json" "$DST/"   # folder map — optional, may not exist yet
+# verify before continuing — counts must match, and the index (plus any
+# existing folder map) must have copied, or the script aborts here:
 echo "src=$(find "$SRC/Recordings" -type f | wc -l)  bak=$(find "$DST/Recordings" -type f | wc -l)"
-ls "$DST/recordings.json" "$DST/folders.json" 2>/dev/null   # confirm index + folder map backed up
+test -f "$DST/recordings.json"
+test ! -e "$SRC/folders.json" || test -f "$DST/folders.json"
 
 # 2. Quit the app if running
 pgrep -f "Mila.app/Contents/MacOS" && osascript -e 'quit app "Mila"' || true

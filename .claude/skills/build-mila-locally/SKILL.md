@@ -9,7 +9,7 @@ description: Use when building, compiling, or running the Mila app locally from 
 
 Mila builds via **XcodeGen** (`project.yml` is the source of truth, NOT the `.xcodeproj`) driven by a `Makefile`. Local builds are **ad-hoc signed** ("Sign to Run Locally") — that is the only "self-signed" path this repo supports. Notarized Developer-ID builds come from a separate private pipeline and are out of scope here.
 
-All build commands run from the repo root (`~/ClonedProjects/mila`).
+All build commands run from the repo root (wherever your checkout lives).
 
 ## Quick Reference
 
