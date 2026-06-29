@@ -130,8 +130,11 @@ jobs:
           # `-test-timeouts-enabled` + allowances: retries DON'T catch a HANG
           # (a test that never returns), so a single stuck subprocess test
           # used to run the whole job out to its 30-min cap. With per-test
-          # timeouts a hung test is force-failed at 120s and then retried,
-          # bounding a hang to minutes instead of the full job budget.
+          # timeouts a hung test is force-failed and then retried, bounding a
+          # hang to minutes instead of the full job budget. 240s default
+          # leaves room for the slowest legit test (the model-reenqueue test
+          # awaits waitForIdle TWICE, up to 90s each under this heavy job's
+          # load) while still bounding a true hang.
           xcodebuild \
             -project Mila.xcodeproj \
             -scheme Mila \
@@ -142,8 +145,8 @@ jobs:
             -retry-tests-on-failure \
             -test-iterations 3 \
             -test-timeouts-enabled YES \
-            -default-test-execution-time-allowance 120 \
-            -maximum-test-execution-time-allowance 300 \
+            -default-test-execution-time-allowance 240 \
+            -maximum-test-execution-time-allowance 480 \
             test
 
       - name: Run What's New popup UI test (non-fatal)

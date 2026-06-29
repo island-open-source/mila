@@ -97,9 +97,11 @@ jobs:
           # tests up to 3× (early-exit on first pass) so a load-induced flake
           # doesn't red the build; genuine failures still fail all 3 attempts.
           # `-test-timeouts-enabled` + allowances bound a HANG (which retries
-          # can't catch) to 120s/test instead of the 30-min job cap — a stuck
-          # subprocess test used to run this whole job out to timeout.
-          # Mirrors the same flags in ci.yml's build-and-test job.
+          # can't catch) instead of the 30-min job cap — a stuck subprocess
+          # test used to run this whole job out to timeout. 240s default
+          # leaves room for the slowest legit test (the model-reenqueue test
+          # awaits waitForIdle TWICE, up to 90s each under load) while still
+          # bounding a true hang to minutes. Mirrors ci.yml's build-and-test.
           xcodebuild -project Mila.xcodeproj \
             -scheme Mila \
             -configuration Debug \
@@ -109,8 +111,8 @@ jobs:
             -retry-tests-on-failure \
             -test-iterations 3 \
             -test-timeouts-enabled YES \
-            -default-test-execution-time-allowance 120 \
-            -maximum-test-execution-time-allowance 300 \
+            -default-test-execution-time-allowance 240 \
+            -maximum-test-execution-time-allowance 480 \
             test 2>&1 | tail -200
 
       - name: Run UI tests

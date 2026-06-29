@@ -208,7 +208,18 @@ final class TranscriptionService: ObservableObject {
 
     /// Wait until the worker has fully drained the queue and gone idle.
     /// Used by tests to assert post-conditions deterministically.
-    func waitForIdle(timeout: TimeInterval = 30) async {
+    ///
+    /// The loop exits the instant the queue drains, so a healthy run
+    /// returns in milliseconds; `timeout` only caps a stuck run. It was
+    /// 30s, which under the heavy `build-and-test` runner's load was too
+    /// short — the background transcribe Task could be starved past 30s,
+    /// so `waitForIdle` returned WHILE STILL BUSY and the caller asserted
+    /// on stale state (flaked
+    /// `test_changing_recording_language_routes_to_other_model_on_reenqueue`
+    /// et al.). 90s gives the scheduler ample slack without affecting the
+    /// common case; genuine deadlocks are still bounded by the CI
+    /// per-test execution-time allowance.
+    func waitForIdle(timeout: TimeInterval = 90) async {
         let deadline = Date().addingTimeInterval(timeout)
         while (activeRecordingID != nil || !queue.isEmpty) && Date() < deadline {
             try? await Task.sleep(nanoseconds: 20_000_000)
