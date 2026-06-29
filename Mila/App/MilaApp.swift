@@ -3,6 +3,7 @@ import AppKit
 import Combine
 import OSLog
 import Sparkle
+import TranscriptionCore
 
 /// Wraps Sparkle's `SPUStandardUpdaterController` so SwiftUI menu items can
 /// observe `canCheckForUpdates` and disable themselves while a check is
@@ -991,6 +992,15 @@ struct MilaApp: App {
         var feedTask: Task<Void, Never>?
         var aiEnabledCancellable: AnyCancellable?
 
+        // Neural-VAD gate, loaded lazily once and reused across
+        // recordings (this loop is long-lived). The bundled Silero
+        // model is ~0.9 MB; load it the first time a recording opts in
+        // and cache the result. `loadAttempted` keeps a failed load
+        // (missing/corrupt model) from retrying every recording — on
+        // failure we simply run without the gate (today's behaviour).
+        var sileroVAD: SileroVAD?
+        var sileroVADLoadAttempted = false
+
         // Hardware gate: re-checked PER-RECORDING (not at function
         // level) so the user can toggle `forceLiveAIOnLowEndHardware`
         // mid-session and have the next recording pick up the change.
@@ -1044,6 +1054,24 @@ struct MilaApp: App {
                 // up (default 5s, settable in Settings → Live AI).
                 transcriber.chunkSeconds = aiSettings.chunkSeconds
                 transcriber.useVAD = aiSettings.useVAD
+                // Attach the neural-VAD speech gate (drops noise-only
+                // utterances before whisper). Only meaningful on the VAD
+                // path; the fixed-timer path has no per-utterance gate.
+                if aiSettings.useNeuralVAD && aiSettings.useVAD {
+                    if !sileroVADLoadAttempted {
+                        sileroVADLoadAttempted = true
+                        if let vadPath = Bundle.main.path(forResource: "ggml-silero-v5.1.2", ofType: "bin") {
+                            sileroVAD = try? SileroVAD(modelPath: vadPath)
+                        }
+                        if sileroVAD == nil {
+                            os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+                                .error("Neural VAD enabled but Silero model failed to load — running without the gate")
+                        }
+                    }
+                    transcriber.speechGate = sileroVAD
+                } else {
+                    transcriber.speechGate = nil
+                }
                 // Wire each VAD-bounded utterance into the speaker
                 // diarizer. Without this, diarizer.process is never
                 // called, intervals stays empty, and segments never

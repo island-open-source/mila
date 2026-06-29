@@ -1411,6 +1411,16 @@ private struct LiveAISettingsTab: View {
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Filter non-speech (neural VAD)", isOn: $settings.useNeuralVAD)
+                        .font(.callout.weight(.semibold))
+                        .disabled(!settings.useVAD)
+                    Text("Run a lightweight neural voice detector on each segment and skip ones with no actual speech. Stops whisper from inventing filler text on background noise or silence. Recommended on. Needs auto-segment.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
                     Toggle("Background mode (hide live pane)", isOn: $settings.backgroundMode)
                         .font(.callout.weight(.semibold))
                     Text("Stay on the Home screen during recording. Transcription, speaker labels, and Live AI summary still run in the background and are saved when you stop. Useful on lower-power Macs where rendering the live pane competes with whisper for CPU.")

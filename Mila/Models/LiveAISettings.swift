@@ -62,6 +62,21 @@ final class LiveAISettings: ObservableObject {
         didSet { defaults.set(useVAD, forKey: Keys.useVAD) }
     }
 
+    /// When true (and `useVAD` is on), each RMS-detected utterance is
+    /// re-checked by the bundled Silero neural VAD before it reaches
+    /// whisper. Utterances that contain no actual human speech (room
+    /// noise, music, keyboard, AC hum that cleared the energy cutoff)
+    /// are dropped, which kills the "whisper hallucinates filler on
+    /// silence/noise" problem (e.g. the Hebrew `תודה רבה אדוני יושב
+    /// ראש הכנסת`). On by default — the model is ~0.9 MB and the check
+    /// is a few ms per utterance, and it *saves* CPU by skipping
+    /// whisper on noise-only segments. Escape hatch for the rare case
+    /// where it clips genuinely quiet speech. Only meaningful when
+    /// `useVAD` is on (the fixed-timer path has no per-utterance gate).
+    @Published var useNeuralVAD: Bool {
+        didSet { defaults.set(useNeuralVAD, forKey: Keys.useNeuralVAD) }
+    }
+
     /// When true, the recording UI stays on the Home screen (just a
     /// Stop button) instead of switching to the LiveAIRecordingView's
     /// split pane. Transcription + summary continue to run in the
@@ -210,6 +225,11 @@ final class LiveAISettings: ObservableObject {
         // Default ON: users who never touched the toggle get the
         // cleaner-boundary VAD path. Explicit false is preserved.
         self.useVAD = defaults.object(forKey: Keys.useVAD) as? Bool ?? true
+        // Default ON: the neural-VAD gate is a strict quality win
+        // (drops noise-only utterances that whisper would hallucinate
+        // on) and a CPU win (skips whisper on those). Explicit false
+        // is preserved for users who turned it off.
+        self.useNeuralVAD = defaults.object(forKey: Keys.useNeuralVAD) as? Bool ?? true
         self.backgroundMode = defaults.bool(forKey: Keys.backgroundMode)
         self.forceLiveAIOnLowEndHardware = defaults.bool(forKey: Keys.forceLowEnd)
         let sim = defaults.double(forKey: Keys.simThreshold)
@@ -300,6 +320,7 @@ the content.
         static let chunkSeconds = "liveAI.chunkSeconds"
         static let llmMinInterval = "liveAI.llmMinIntervalSeconds"
         static let useVAD = "liveAI.useVAD"
+        static let useNeuralVAD = "liveAI.useNeuralVAD"
         static let backgroundMode = "liveAI.backgroundMode"
         static let forceLowEnd = "liveAI.forceOnLowEndHardware"
         static let simThreshold = "liveAI.speakerSimilarityThreshold"
