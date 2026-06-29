@@ -60,6 +60,95 @@ final class RemoteTranscriptionSettingsTests: XCTestCase {
         XCTAssertEqual(config?.model, RemoteTranscriptionSettings.defaultModel)
     }
 
+    func test_localBackend_doesNotReadKeychain() {
+        // Seed a real token under an isolated key, then construct with the
+        // default (local) backend. A local-only user must come up with an empty
+        // apiKey and we must NOT have read the Keychain (which would prompt).
+        let key = "RemoteTranscriptionSettingsTests.\(#function).apiKey"
+        KeychainHelper.delete(key: key)
+        KeychainHelper.save(key: key, value: "sk-stored")
+        defer { KeychainHelper.delete(key: key) }
+
+        let suite = UserDefaults(suiteName: "RemoteTranscriptionSettingsTests.\(#function)")!
+        suite.removePersistentDomain(forName: "RemoteTranscriptionSettingsTests.\(#function)")
+        let settings = RemoteTranscriptionSettings(defaults: suite, apiKeyKeychainKey: key)
+
+        XCTAssertEqual(settings.backend, .local)
+        XCTAssertEqual(settings.apiKey, "", "Local-only launch must not load the stored token")
+    }
+
+    func test_switchingToRemote_lazilyLoadsStoredToken() {
+        let key = "RemoteTranscriptionSettingsTests.\(#function).apiKey"
+        KeychainHelper.delete(key: key)
+        KeychainHelper.save(key: key, value: "sk-stored")
+        defer { KeychainHelper.delete(key: key) }
+
+        let suite = UserDefaults(suiteName: "RemoteTranscriptionSettingsTests.\(#function)")!
+        suite.removePersistentDomain(forName: "RemoteTranscriptionSettingsTests.\(#function)")
+        let settings = RemoteTranscriptionSettings(defaults: suite, apiKeyKeychainKey: key)
+        XCTAssertEqual(settings.apiKey, "")
+
+        settings.backend = .remote
+        XCTAssertEqual(settings.apiKey, "sk-stored",
+                       "Switching to remote must lazily load the stored token")
+    }
+
+    func test_remoteBackendAtLaunch_loadsStoredToken() {
+        // If remote was the persisted choice, the token should be present right
+        // after construction (the one case where reading at launch is correct).
+        let key = "RemoteTranscriptionSettingsTests.\(#function).apiKey"
+        KeychainHelper.delete(key: key)
+        KeychainHelper.save(key: key, value: "sk-stored")
+        defer { KeychainHelper.delete(key: key) }
+
+        let suite = UserDefaults(suiteName: "RemoteTranscriptionSettingsTests.\(#function)")!
+        suite.removePersistentDomain(forName: "RemoteTranscriptionSettingsTests.\(#function)")
+        suite.set(TranscriptionBackend.remote.rawValue, forKey: "transcription.backend")
+        let settings = RemoteTranscriptionSettings(defaults: suite, apiKeyKeychainKey: key)
+
+        XCTAssertEqual(settings.backend, .remote)
+        XCTAssertEqual(settings.apiKey, "sk-stored")
+    }
+
+    func test_lazyLoad_doesNotClobberInProgressEdit() {
+        // User typed a key before ever switching to remote. Switching must keep
+        // their edit, not overwrite it with the stored value.
+        let key = "RemoteTranscriptionSettingsTests.\(#function).apiKey"
+        KeychainHelper.delete(key: key)
+        KeychainHelper.save(key: key, value: "sk-stored")
+        defer { KeychainHelper.delete(key: key) }
+
+        let suite = UserDefaults(suiteName: "RemoteTranscriptionSettingsTests.\(#function)")!
+        suite.removePersistentDomain(forName: "RemoteTranscriptionSettingsTests.\(#function)")
+        let settings = RemoteTranscriptionSettings(defaults: suite, apiKeyKeychainKey: key)
+
+        settings.apiKey = "sk-user-typed"
+        settings.backend = .remote
+        XCTAssertEqual(settings.apiKey, "sk-user-typed",
+                       "An in-progress edit must not be clobbered by the lazy load")
+    }
+
+    func test_lazyLoad_isIdempotentAcrossBackendToggles() {
+        // Once loaded, toggling local <-> remote must not re-read or clobber.
+        let key = "RemoteTranscriptionSettingsTests.\(#function).apiKey"
+        KeychainHelper.delete(key: key)
+        KeychainHelper.save(key: key, value: "sk-stored")
+        defer { KeychainHelper.delete(key: key) }
+
+        let suite = UserDefaults(suiteName: "RemoteTranscriptionSettingsTests.\(#function)")!
+        suite.removePersistentDomain(forName: "RemoteTranscriptionSettingsTests.\(#function)")
+        let settings = RemoteTranscriptionSettings(defaults: suite, apiKeyKeychainKey: key)
+
+        settings.backend = .remote
+        XCTAssertEqual(settings.apiKey, "sk-stored")
+        // User clears the field, then flips back to local and to remote again.
+        settings.apiKey = ""
+        settings.backend = .local
+        settings.backend = .remote
+        XCTAssertEqual(settings.apiKey, "",
+                       "Already-loaded token must not be re-read on a later switch")
+    }
+
     func test_editingEndpointResetsTestStatus() async {
         // Stub the network so testConnection() actually seeds a non-idle
         // status (.ok), then assert that editing the endpoint resets it —
