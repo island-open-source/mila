@@ -131,7 +131,12 @@ killall Dock
 
 ```bash
 mdfind -name "Mila.app" 2>/dev/null | grep -v "/.Trash/" || echo "(no app outside Trash)"
-ls -d ~/Library/{Preferences/io.island.whisper.IslandWhisper.plist,Caches/io.island.whisper.IslandWhisper,HTTPStorages/io.island.whisper.IslandWhisper,WebKit/io.island.whisper.IslandWhisper} 2>/dev/null || echo "(footprint gone)"
+# Removable footprint should be gone. The Preferences plist is kept by default,
+# so it's checked separately below — don't list it here or a routine uninstall
+# looks like it failed.
+ls -d ~/Library/{Caches/io.island.whisper.IslandWhisper,HTTPStorages/io.island.whisper.IslandWhisper,WebKit/io.island.whisper.IslandWhisper} 2>/dev/null || echo "(removable footprint gone)"
+# Preferences plist: present on a routine uninstall (kept), absent only after a full reset.
+ls -d ~/Library/Preferences/io.island.whisper.IslandWhisper.plist 2>/dev/null && echo "(prefs kept — routine)" || echo "(prefs removed — full reset)"
 defaults read com.apple.dock persistent-apps 2>/dev/null | grep -i mila || echo "(no Mila in Dock)"
 # user data intact:
 ls "$HOME/Library/Application Support/Mila/Recordings" | wc -l
