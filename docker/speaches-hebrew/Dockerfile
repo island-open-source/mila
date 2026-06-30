@@ -50,12 +50,20 @@ RUN python -c "from huggingface_hub import snapshot_download; \
 #   - WHISPER__INFERENCE_DEVICE/COMPUTE_TYPE: CPU int8 — the GitHub runner has no
 #     GPU, and int8 keeps the turbo model's latency tolerable.
 #   - ENABLE_UI=false: no gradio UI; this is an API-only server.
-#   - ALLOW_ORIGINS=["*"]: the E2E client reaches it through a tunnel hostname.
-ENV PRELOAD_MODELS=["${MODEL_ID}"] \
+#   - ALLOW_ORIGINS: the E2E client reaches it through a tunnel hostname.
+#
+# NOTE on the JSON-list vars (PRELOAD_MODELS, ALLOW_ORIGINS): speaches parses
+# these with pydantic-settings as JSON, so the value must be a valid JSON list —
+# `["*"]`, with the inner double-quotes intact. Docker's `ENV KEY=value` parser
+# STRIPS surrounding double-quotes, so a bare `ALLOW_ORIGINS=["*"]` reaches the
+# app as `[*]`, which pydantic rejects (`Input should be a valid list`) and the
+# container crashes on boot. Escape the inner quotes (`\"`) so the env value is
+# literally `["*"]`.
+ENV PRELOAD_MODELS=["\"${MODEL_ID}\""] \
     WHISPER__INFERENCE_DEVICE=cpu \
     WHISPER__COMPUTE_TYPE=int8 \
     ENABLE_UI=false \
-    ALLOW_ORIGINS=["*"] \
+    ALLOW_ORIGINS=["\"*\""] \
     UVICORN_HOST=0.0.0.0 \
     UVICORN_PORT=8000
 
