@@ -31,6 +31,12 @@ final class RecordingSummarizerTests: XCTestCase {
         llmDefaults = UserDefaults(suiteName: llmSuite)
         liveDefaults = UserDefaults(suiteName: liveSuite)
         llm = LLMSettings(defaults: llmDefaults)
+        // Short CLI timeout so a genuinely-stuck scripted CLI is SIGKILL'd in
+        // seconds (bounding `awaitInFlight`, which awaits the real task) rather
+        // than the 300s production default. The test scripts are instant; this
+        // only caps a pathological hang under CI contention so the suite fails
+        // fast instead of stalling.
+        llm.cliTimeout = 15
         liveAI = LiveAISettings(defaults: liveDefaults)
         summarizer = RecordingSummarizer(store: store,
                                          llmSettings: llm,
@@ -138,7 +144,7 @@ final class RecordingSummarizerTests: XCTestCase {
         store.add(rec)
 
         summarizer.summarizeIfNeeded(rec)
-        try await waitForSummary(recordingID: rec.id, timeoutSeconds: 120)
+        await summarizer.awaitInFlight(rec.id)
 
         let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertEqual(updated.summary, "A concise summary of the meeting.")
@@ -188,7 +194,7 @@ final class RecordingSummarizerTests: XCTestCase {
         store.add(rec)
 
         summarizer.summarizeIfNeeded(rec)
-        try await waitForSummary(recordingID: rec.id, timeoutSeconds: 120)
+        await summarizer.awaitInFlight(rec.id)
 
         // The CLI ran and its output was stored — proves the call completed.
         let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
@@ -230,11 +236,9 @@ final class RecordingSummarizerTests: XCTestCase {
         store.add(rec)
 
         summarizer.summarizeIfNeeded(rec)
-        // Wait long enough for the script to finish, but the summarizer
-        // should leave the recording alone.
-        try await Task.sleep(nanoseconds: 1_000_000_000)
-        // Drain any straggler.
-        try await waitForNoInFlight(recordingID: rec.id, timeoutSeconds: 10)
+        // Await the real task: the (empty-output) CLI run completes and the
+        // summarizer must have left the recording's summary alone.
+        await summarizer.awaitInFlight(rec.id)
 
         let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertNil(updated.summary)
@@ -273,7 +277,9 @@ final class RecordingSummarizerTests: XCTestCase {
             store.update(current)
         }
 
-        try await waitForNoInFlight(recordingID: rec.id, timeoutSeconds: 120)
+        // Await the real CLI task: when it returns it must NOT clobber the
+        // summary that landed mid-flight.
+        await summarizer.awaitInFlight(rec.id)
         let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertEqual(updated.summary, "live_summary_from_recording",
                        "Late-arriving CLI output must not overwrite a summary that already exists")
@@ -304,8 +310,13 @@ final class RecordingSummarizerTests: XCTestCase {
         store.add(rec)
 
         summarizer.summarizeIfNeeded(rec)
-        // Give a doomed CLI call time to land if the gate failed.
-        try await Task.sleep(nanoseconds: 500_000_000)
+        // The auto-summary gate is synchronous: a disabled toggle means
+        // `runSummary` is never reached, so no CLI task is ever spawned. Assert
+        // that deterministically (no in-flight work), then await for safety —
+        // `awaitInFlight` returns immediately when nothing is in flight.
+        XCTAssertFalse(summarizer.isSummarizing(rec.id),
+                       "Disabled auto-summary must not spawn a CLI task")
+        await summarizer.awaitInFlight(rec.id)
         let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertNil(updated.summary,
                      "No summary should be written while auto-summary is disabled")
@@ -341,9 +352,9 @@ final class RecordingSummarizerTests: XCTestCase {
         store.add(rec)
 
         summarizer.regenerate(rec)
-        try await waitForSummary(recordingID: rec.id,
-                                 timeoutSeconds: 120,
-                                 expected: "ON DEMAND")
+        // Deterministic: await the actual in-flight task rather than polling
+        // the store on a timer (which slipped under CI contention).
+        await summarizer.awaitInFlight(rec.id)
         let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertEqual(updated.summary, "ON DEMAND")
     }
@@ -378,9 +389,7 @@ final class RecordingSummarizerTests: XCTestCase {
         // `summarizeIfNeeded` would bail because a summary already
         // exists; `regenerate` bypasses that gate.
         summarizer.regenerate(rec)
-        try await waitForSummary(recordingID: rec.id,
-                                 timeoutSeconds: 120,
-                                 expected: "REGENERATED")
+        await summarizer.awaitInFlight(rec.id)
         let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertEqual(updated.summary, "REGENERATED")
     }
@@ -401,8 +410,10 @@ final class RecordingSummarizerTests: XCTestCase {
         store.add(rec)
 
         summarizer.regenerate(rec)
-        // Give it a beat — nothing should have happened.
-        try await Task.sleep(nanoseconds: 200_000_000)
+        // The gate is synchronous: an unconfigured LLM means no task is spawned.
+        XCTAssertFalse(summarizer.isSummarizing(rec.id),
+                       "regenerate must not spawn a task when the LLM is unconfigured")
+        await summarizer.awaitInFlight(rec.id)
         let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertEqual(updated.summary, "old summary")
     }
@@ -428,7 +439,10 @@ final class RecordingSummarizerTests: XCTestCase {
         store.add(rec)
 
         summarizer.regenerate(rec)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        // The gate is synchronous: an empty transcript means no task is spawned.
+        XCTAssertFalse(summarizer.isSummarizing(rec.id),
+                       "regenerate must not spawn a task for an empty transcript")
+        await summarizer.awaitInFlight(rec.id)
         let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertEqual(updated.summary, "old",
                        "Empty transcript must not trigger a CLI call")
@@ -459,62 +473,19 @@ final class RecordingSummarizerTests: XCTestCase {
 
         XCTAssertFalse(summarizer.isSummarizing(rec.id))
         summarizer.summarizeIfNeeded(rec)
-        // Yield so the Task body actually starts and registers itself.
-        try await Task.sleep(nanoseconds: 50_000_000)
+        // `inFlightIDs.insert` runs synchronously inside `summarizeIfNeeded`
+        // (before the Task is even created), so the flag is true the instant
+        // the call returns — no sleep/yield needed.
         XCTAssertTrue(summarizer.isSummarizing(rec.id),
                       "isSummarizing should be true while CLI is running")
 
-        try await waitForSummary(recordingID: rec.id, timeoutSeconds: 120)
+        // Await the real task completion rather than polling on a timer.
+        await summarizer.awaitInFlight(rec.id)
         XCTAssertFalse(summarizer.isSummarizing(rec.id),
                        "isSummarizing should clear after CLI returns")
     }
 
     // MARK: - Helpers
-
-    /// Poll the store until the recording's `summary` is non-nil, or fail
-    /// if it doesn't land in the given window. Script-as-CLI tests can
-    /// take a couple of seconds on a cold runner (subprocess spawn +
-    /// pipe drain) so the default 30s budget is generous.
-    private func waitForSummary(recordingID: UUID,
-                                timeoutSeconds: TimeInterval,
-                                expected: String? = nil) async throws {
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
-        while Date() < deadline {
-            if let rec = store.recordings.first(where: { $0.id == recordingID }),
-               let s = rec.summary, !s.isEmpty {
-                if let expected {
-                    // Caller wants to wait for a specific replacement
-                    // value (regenerate path) rather than "any non-empty
-                    // summary" (initial run path). Without this the
-                    // regenerate test would short-circuit on the OLD
-                    // summary present before regenerate() even started.
-                    if s == expected { return }
-                } else {
-                    return
-                }
-            }
-            try await Task.sleep(nanoseconds: 50_000_000)
-        }
-        XCTFail("Timed out waiting for summary on \(recordingID)")
-    }
-
-    /// Wait for the summarizer's in-flight bookkeeping to clear — used
-    /// when we EXPECT no summary to land (so we can't just wait for one).
-    private func waitForNoInFlight(recordingID: UUID,
-                                   timeoutSeconds: TimeInterval) async throws {
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
-        while Date() < deadline {
-            // The summarizer exposes no public introspection of its
-            // task table — best proxy is "calling summarizeIfNeeded a
-            // second time was a no-op because the first was still
-            // running." Easier: just give the scripted CLI long
-            // enough to finish.
-            try await Task.sleep(nanoseconds: 100_000_000)
-            // If the script has already exited, the task in `inFlight`
-            // will have cleared itself in the `defer` block.
-            return
-        }
-    }
 
     private func makeScript(_ body: String) -> URL {
         let url = FileManager.default.temporaryDirectory

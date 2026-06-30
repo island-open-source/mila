@@ -125,6 +125,20 @@ final class RecordingSummarizer: ObservableObject {
         inFlightIDs.contains(recordingID)
     }
 
+    /// Await the in-flight summary task for `recordingID`, if one is running.
+    /// Returns immediately when nothing is in flight (already finished, or
+    /// never started). Test seam: lets tests wait on the REAL completion
+    /// signal — the underlying `Task` finishing — instead of polling the
+    /// store on a timer. Polling is inherently racy under CI contention (the
+    /// subprocess spawn + pipe drain can slip past a fixed window); awaiting
+    /// the task itself is deterministic. The task clears its own `inFlight`
+    /// entry in a `defer`, so by the time this returns the store write (if any)
+    /// has already happened.
+    func awaitInFlight(_ recordingID: UUID) async {
+        guard let task = inFlight[recordingID] else { return }
+        await task.value
+    }
+
     // MARK: - Public API
 
     /// Kick off a background summary for `recording` if the gate above
