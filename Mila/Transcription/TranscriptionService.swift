@@ -550,7 +550,17 @@ final class TranscriptionService: ObservableObject {
                 try await engine.loadIfNeeded(modelURL: modelManager.url(for: localModel),
                                               displayName: localModel.displayName)
             }
-            let audioURL = store.audioURL(for: recording)
+            // Resolve the audio URL from the freshly re-fetched `working`
+            // record, NOT the stale `recording` snapshot captured at enqueue
+            // time. A re-transcribe (right-click "Re-transcribe in …") enqueues
+            // a snapshot still pointing at the original `.wav`, but the previous
+            // pass's background compression may have since renamed that file to
+            // `.m4a` and deleted the `.wav`. Reading the stale `.wav` path would
+            // then throw "file not found", failing the re-transcribe and leaving
+            // the old transcript in place. `working` always reflects the current
+            // on-disk name. (Paired with the compress/re-transcribe guard in
+            // `RecordingStore.compressRecordingAudio`.)
+            let audioURL = store.audioURL(for: working)
             let samples = try AudioConvert.loadAsWhisperSamples(url: audioURL)
             let durationSeconds = Double(samples.count) / Double(WhisperAudioFormat.sampleRate)
             let peak = samples.map { abs($0) }.max() ?? 0

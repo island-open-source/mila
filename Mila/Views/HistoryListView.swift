@@ -313,7 +313,13 @@ private struct HistoryRow: View {
             Divider()
             let currentLang = RecordingLanguage.fromCode(recording.language)
             Button("Re-transcribe (\(currentLang.flagEmoji) \(currentLang.displayName))") {
-                transcription.enqueue(recording)
+                // Enqueue the CURRENT store record (its audioFileName may have
+                // been compressed to .m4a since this menu captured `recording`).
+                if let current = store.recordings.first(where: { $0.id == recording.id }) {
+                    transcription.enqueue(current)
+                } else {
+                    transcription.enqueue(recording)
+                }
             }
             Button("Re-transcribe in \(currentLang.other.flagEmoji) \(currentLang.other.displayName)") {
                 retranscribe(recording, in: currentLang.other)
@@ -348,11 +354,12 @@ private struct HistoryRow: View {
     /// model (ivrit.ai for Hebrew, OpenAI for English), so updating the
     /// store before enqueueing is enough to re-run with the other model.
     private func retranscribe(_ recording: Recording, in language: RecordingLanguage) {
-        var copy = recording
-        copy.language = language.rawValue
-        copy.status = .pending
-        store.update(copy)
-        transcription.enqueue(copy)
+        // Mutate only language+status on the LIVE record so we don't clobber a
+        // since-compressed `.m4a` audioFileName back to a deleted `.wav`.
+        guard let prepared = store.prepareForRetranscription(id: recording.id,
+                                                             language: language.rawValue)
+        else { return }
+        transcription.enqueue(prepared)
     }
 
     /// Save the recording's SRT to a user-chosen location. NSSavePanel lets

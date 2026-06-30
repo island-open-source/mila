@@ -505,10 +505,11 @@ final class TranscriptionServiceTests: XCTestCase {
                        manager.url(for: .ivritLarge).lastPathComponent,
                        "First pass should hit the Hebrew model")
 
-        var swapped = try XCTUnwrap(store.recordings.first { $0.id == fixture.recording.id })
-        swapped.language = "en"
-        swapped.status = .pending
-        store.update(swapped)
+        // Flip the language + re-enqueue through the production chokepoint.
+        // (Previously this clobbered the store with a stale snapshot via
+        // `store.update`, which could rewrite a since-compressed `.m4a` audio
+        // name back to a deleted `.wav` and flake the second pass to `.failed`.)
+        let swapped = try XCTUnwrap(store.prepareForRetranscription(id: fixture.recording.id, language: "en"))
         service.enqueue(swapped)
         await service.waitForIdle()
 
@@ -521,6 +522,89 @@ final class TranscriptionServiceTests: XCTestCase {
         XCTAssertEqual(stored.fullText, "second pass")
         XCTAssertEqual(stored.language, "en")
         XCTAssertEqual(stored.status, .completed)
+    }
+
+    /// REGRESSION (flaky CI): re-transcribing a recording whose previous pass's
+    /// background WAV→m4a compression has ALREADY finished must still succeed.
+    ///
+    /// Root cause of the flake: after a completed transcription the service
+    /// kicks off `RecordingStore.compressRecordingAudio`, which renames the
+    /// `.wav` to `.m4a` and deletes the WAV. The re-transcribe path enqueued a
+    /// stale `Recording` snapshot still pointing at the now-deleted `.wav`, so
+    /// the second pass failed with "file not found" — landing `.failed` with the
+    /// OLD transcript still showing. Under CI contention the compression
+    /// regularly won that race; locally it usually didn't, hence the flake.
+    ///
+    /// This test makes that ordering DETERMINISTIC by awaiting the compression
+    /// before re-enqueuing — the second pass must read the recording's CURRENT
+    /// on-disk audio (the `.m4a`), not the stale snapshot's `.wav`.
+    func test_retranscribe_after_audio_compressed_reads_current_file_not_stale_wav() async throws {
+        let fixture = try TestRecordingFixture.make(in: store,
+                                                    title: "Compressed then retranscribed",
+                                                    durationSeconds: 1.0,
+                                                    language: "he")
+        await stub.setCannedQueue([
+            [TranscriptSegment(start: 0, end: 1, text: "first pass")],
+            [TranscriptSegment(start: 0, end: 1, text: "second pass")]
+        ])
+
+        // First pass.
+        service.enqueue(fixture.recording)
+        await service.waitForIdle()
+        let firstStored = try XCTUnwrap(store.recordings.first { $0.id == fixture.recording.id })
+        XCTAssertEqual(firstStored.status, .completed)
+        XCTAssertEqual(firstStored.fullText, "first pass")
+
+        // Force the post-completion compression to FULLY complete: this renames
+        // the WAV to .m4a and deletes the WAV — exactly the on-disk state the CI
+        // flake hit when compression won the race against re-transcribe. (The
+        // first pass also auto-kicks a compression; awaiting here is idempotent
+        // and guarantees the on-disk file is the .m4a regardless of which won.)
+        await store.compressRecordingAudio(id: fixture.recording.id)
+        let compressed = try XCTUnwrap(store.recordings.first { $0.id == fixture.recording.id })
+        XCTAssertTrue(compressed.audioFileName.lowercased().hasSuffix(".m4a"),
+                      "Compression should have swapped the audio to .m4a")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.audioURL(for: fixture.recording).path),
+                       "The original .wav (stale snapshot's path) must be gone")
+
+        // Re-transcribe via the store's `prepareForRetranscription` chokepoint
+        // (what the real re-transcribe UI now uses). It must preserve the
+        // current `.m4a` audioFileName rather than clobbering it back to the
+        // deleted `.wav` from a stale snapshot.
+        let prepared = try XCTUnwrap(store.prepareForRetranscription(id: fixture.recording.id))
+        XCTAssertTrue(prepared.audioFileName.lowercased().hasSuffix(".m4a"),
+                      "prepareForRetranscription must keep the compressed .m4a name")
+        service.enqueue(prepared)
+        await service.waitForIdle()
+
+        let stored = try XCTUnwrap(store.recordings.first { $0.id == fixture.recording.id })
+        XCTAssertEqual(stored.status, .completed,
+                       "Re-transcribe must succeed against the compressed .m4a, not fail on the stale .wav")
+        XCTAssertEqual(stored.fullText, "second pass",
+                       "Second pass transcript must overwrite the first")
+        let calls = await stub.transcribeCalls
+        XCTAssertEqual(calls.count, 2, "Both passes must have reached the engine")
+    }
+
+    /// Direct unit test for the chokepoint: `prepareForRetranscription` must
+    /// NOT reset the store-owned `audioFileName` even when the previous pass's
+    /// compression has already renamed the audio to `.m4a`. (Regression for the
+    /// stale-snapshot clobber that failed re-transcription with "file not
+    /// found".)
+    func test_prepareForRetranscription_preserves_compressed_audio_filename() async throws {
+        let fixture = try TestRecordingFixture.make(in: store, title: "Keep m4a", durationSeconds: 1.0)
+        await stub.setDefaultCanned([TranscriptSegment(start: 0, end: 1, text: "done")])
+        service.enqueue(fixture.recording)
+        await service.waitForIdle()
+        await store.compressRecordingAudio(id: fixture.recording.id)
+
+        let beforeName = try XCTUnwrap(store.recordings.first { $0.id == fixture.recording.id }).audioFileName
+        XCTAssertTrue(beforeName.lowercased().hasSuffix(".m4a"))
+
+        let prepared = try XCTUnwrap(store.prepareForRetranscription(id: fixture.recording.id, language: "en"))
+        XCTAssertEqual(prepared.audioFileName, beforeName, "audioFileName must be preserved")
+        XCTAssertEqual(prepared.language, "en", "language must be switched")
+        XCTAssertEqual(prepared.status, .pending, "status must be reset to pending")
     }
 
     // MARK: - Speaker label normalization
