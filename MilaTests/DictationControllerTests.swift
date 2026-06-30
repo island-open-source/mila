@@ -24,7 +24,7 @@ final class DictationControllerTests: XCTestCase {
         try TestSupport.installFakeModel(into: manager, model: .ivritLarge)
         try TestSupport.installFakeModel(into: manager, model: .openaiTurbo)
         stub = StubWhisperEngine()
-        service = TranscriptionService(store: store, modelManager: manager, diarizationSettings: DiarizationSettings(defaults: .init(suiteName: "DictationControllerTests.diarization")!), engine: stub)
+        service = TranscriptionService(store: store, modelManager: manager, diarizationSettings: DiarizationSettings(defaults: .init(suiteName: "DictationControllerTests.diarization")!), remoteSettings: TestSupport.isolatedRemoteSettings(label: "DictationControllerTests"), engine: stub)
 
         UserDefaults().removePersistentDomain(forName: "DictationControllerTests")
         defaultsSuite = UserDefaults(suiteName: "DictationControllerTests")

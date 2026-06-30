@@ -110,6 +110,26 @@ enum TestSupport {
         try Data("not-a-real-model-just-for-tests".utf8).write(to: url)
         manager.refreshInstalled()
     }
+
+    /// A `RemoteTranscriptionSettings` isolated to a fresh per-`label`
+    /// UserDefaults suite, defaulting to the LOCAL backend.
+    ///
+    /// Any `TranscriptionService` test that injects a `StubWhisperEngine`
+    /// MUST also pass one of these as `remoteSettings:`. Otherwise the service
+    /// falls back to `RemoteTranscriptionSettings()` which reads `.standard`
+    /// UserDefaults — and on a machine where `transcription.backend = remote`
+    /// is persisted there (a dev box that ran Live AI, or a leaked test write),
+    /// the service routes to the REAL remote endpoint and bypasses the stub
+    /// entirely, reddening the whole suite with real transcripts. Isolating to
+    /// a clean suite (which has no `transcription.backend` key, so it defaults
+    /// to `.local`) makes the stub authoritative regardless of host state.
+    @MainActor
+    static func isolatedRemoteSettings(label: String) -> RemoteTranscriptionSettings {
+        let suiteName = "\(label).remote"
+        let suite = UserDefaults(suiteName: suiteName)!
+        suite.removePersistentDomain(forName: suiteName)
+        return RemoteTranscriptionSettings(defaults: suite)
+    }
 }
 
 /// A `Recording` constructed for tests, paired with its on-disk audio file.

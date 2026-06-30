@@ -58,11 +58,49 @@ final class VoiceMemosLibraryTests: XCTestCase {
 
     // MARK: - Tests
 
+    /// A genuinely-absent DB classifies as `.databaseMissing` (not denied),
+    /// and reads throw the matching `.databaseMissing` error.
     func test_isAvailable_falseWhenDatabaseMissing() {
         let lib = VoiceMemosLibrary(recordingsDirectory: tempRoot)
         XCTAssertFalse(lib.isAvailable)
+        XCTAssertEqual(lib.availability, .databaseMissing)
         XCTAssertThrowsError(try lib.fetchAllRecordings()) { error in
             XCTAssertEqual(error as? VoiceMemosLibrary.LibraryError, .databaseMissing)
+        }
+    }
+
+    /// A present, readable fixture DB classifies as `.available`.
+    func test_availability_availableForReadableDatabase() throws {
+        let lib = try makeFixtureLibrary()
+        XCTAssertEqual(lib.availability, .available)
+        XCTAssertTrue(lib.isAvailable)
+    }
+
+    /// A present-but-unreadable DB (the TCC / Full Disk Access denial case,
+    /// simulated here by stripping read permission) must classify as
+    /// `accessDenied` — distinct from "missing" — and surface a thrown
+    /// `.accessDenied` rather than a generic open failure. See issue #45.
+    func test_availability_accessDeniedWhenUnreadable() throws {
+        // access(2) ignores permission bits for the superuser, so this can't
+        // be exercised as root; skip rather than report a false failure.
+        try XCTSkipIf(getuid() == 0, "access(2) bypasses permission checks as root")
+
+        let lib = try makeFixtureLibrary()
+        let dbURL = tempRoot.appendingPathComponent("CloudRecordings.db")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: dbURL.path)
+        defer {
+            // Restore so tearDown's cleanup isn't affected on any platform.
+            try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: dbURL.path)
+        }
+
+        XCTAssertFalse(lib.isAvailable)
+        guard case .accessDenied = lib.availability else {
+            return XCTFail("expected .accessDenied, got \(lib.availability)")
+        }
+        XCTAssertThrowsError(try lib.fetchAllRecordings()) { error in
+            guard case .accessDenied = error as? VoiceMemosLibrary.LibraryError else {
+                return XCTFail("expected LibraryError.accessDenied, got \(error)")
+            }
         }
     }
 

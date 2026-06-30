@@ -30,6 +30,7 @@ final class LiveTranscriberTests: XCTestCase {
             store: store,
             modelManager: manager,
             diarizationSettings: DiarizationSettings(defaults: .init(suiteName: "LiveTranscriberTests.diarization")!),
+            remoteSettings: TestSupport.isolatedRemoteSettings(label: "LiveTranscriberTests"),
             engine: stub
         )
         transcriber = LiveTranscriber(transcription: service)

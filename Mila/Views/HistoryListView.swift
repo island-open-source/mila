@@ -312,12 +312,27 @@ private struct HistoryRow: View {
             }
             Divider()
             let currentLang = RecordingLanguage.fromCode(recording.language)
+            // Busy = this recording is already transcribing or queued. We gate
+            // BEFORE mutating the store: `enqueue` drops active/queued ids, but
+            // `prepareForRetranscription` persists `.pending`/language first, so
+            // without this guard a re-transcribe on a busy row would clobber its
+            // status even though the enqueue itself no-ops.
+            let isBusy = transcription.activeRecordingID == recording.id
+                || transcription.pendingIDs.contains(recording.id)
             Button("Re-transcribe (\(currentLang.flagEmoji) \(currentLang.displayName))") {
-                transcription.enqueue(recording)
+                // Route through the live-store chokepoint (same as the
+                // language-switch action) so we never enqueue a stale snapshot
+                // whose `.wav` a since-run compression already deleted.
+                guard !isBusy,
+                      let prepared = store.prepareForRetranscription(id: recording.id)
+                else { return }
+                transcription.enqueue(prepared)
             }
+            .disabled(isBusy)
             Button("Re-transcribe in \(currentLang.other.flagEmoji) \(currentLang.other.displayName)") {
                 retranscribe(recording, in: currentLang.other)
             }
+            .disabled(isBusy)
             if llm.isConfigured {
                 Divider()
                 Button("Send to \(llm.tool.displayName)…") {
@@ -348,11 +363,18 @@ private struct HistoryRow: View {
     /// model (ivrit.ai for Hebrew, OpenAI for English), so updating the
     /// store before enqueueing is enough to re-run with the other model.
     private func retranscribe(_ recording: Recording, in language: RecordingLanguage) {
-        var copy = recording
-        copy.language = language.rawValue
-        copy.status = .pending
-        store.update(copy)
-        transcription.enqueue(copy)
+        // Gate before mutating the store: a busy (active/queued) recording must
+        // not have its status/language flipped under an in-flight pass, because
+        // `enqueue` would then no-op the re-run while the store mutation stuck.
+        guard transcription.activeRecordingID != recording.id,
+              !transcription.pendingIDs.contains(recording.id)
+        else { return }
+        // Mutate only language+status on the LIVE record so we don't clobber a
+        // since-compressed `.m4a` audioFileName back to a deleted `.wav`.
+        guard let prepared = store.prepareForRetranscription(id: recording.id,
+                                                             language: language.rawValue)
+        else { return }
+        transcription.enqueue(prepared)
     }
 
     /// Save the recording's SRT to a user-chosen location. NSSavePanel lets

@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import Darwin
 
 /// Read-only reader over the iPhone Voice Memos library that iCloud syncs
 /// to this Mac. Everything lives in a Core Data SQLite store inside the
@@ -40,11 +41,67 @@ struct VoiceMemosLibrary {
         recordingsDirectory.appendingPathComponent("CloudRecordings.db")
     }
 
-    /// True when the Voice Memos DB is present — i.e. the user has the app
-    /// and at least one synced recording. Drives whether the Settings tab
-    /// offers the feature or shows a "no library found" hint.
+    /// `databaseURL.path` with the home directory shortened to `~`. The
+    /// absolute form embeds the macOS account name, so this is the variant
+    /// safe to log at `.public` — it keeps full diagnostic value (which path
+    /// Mila probed) without leaking a user identifier into the unified log.
+    /// See issue #45.
+    var databaseDisplayPath: String {
+        (databaseURL.path as NSString).abbreviatingWithTildeInPath
+    }
+
+    /// `recordingsDirectory.path` with the home directory shortened to `~`;
+    /// the `.public`-safe counterpart used by the watcher-started log line.
+    /// See `databaseDisplayPath`.
+    var recordingsDirectoryDisplayPath: String {
+        (recordingsDirectory.path as NSString).abbreviatingWithTildeInPath
+    }
+
+    /// Why the Voice Memos library can — or can't — be read right now.
+    ///
+    /// A bare `fileExists` check can't tell "the user has no synced library"
+    /// from "macOS denied us access": Mila is **not** sandboxed, so reading
+    /// another app's group container needs Full Disk Access (or a
+    /// Files-and-Folders grant). When that's missing, the OS blocks the path
+    /// and the probe fails with `EPERM`/`EACCES` rather than `ENOENT`.
+    /// Classifying the two lets the importer log the difference and the
+    /// Settings tab show an actionable hint instead of a misleading
+    /// "no library found" message. See issue #45.
+    enum Availability: Equatable {
+        /// The DB is present and readable.
+        case available
+        /// No DB on disk — Voice Memos iCloud sync is off, or there are no
+        /// recordings yet.
+        case databaseMissing
+        /// The DB path is blocked by the OS (missing Full Disk Access /
+        /// Files-and-Folders grant). `reason` is the underlying errno text.
+        case accessDenied(reason: String)
+    }
+
+    /// Classify whether — and why — the Voice Memos DB can be read. Probes
+    /// real read permission with `access(2)` (not just presence) so a TCC
+    /// denial is reported distinctly from a genuinely-absent library.
+    var availability: Availability {
+        if access(databaseURL.path, R_OK) == 0 {
+            return .available
+        }
+        let err = errno
+        switch err {
+        case ENOENT, ENOTDIR:
+            // A path component is genuinely absent — no synced library.
+            return .databaseMissing
+        default:
+            // EPERM / EACCES (TCC denial) and any other unexpected failure:
+            // the read didn't succeed and the file isn't simply missing, so
+            // treat it as "blocked" and carry the reason for the log.
+            return .accessDenied(reason: String(cString: strerror(err)))
+        }
+    }
+
+    /// True when the Voice Memos DB is present and readable. Drives whether
+    /// the Settings tab offers the feature or shows a hint.
     var isAvailable: Bool {
-        FileManager.default.fileExists(atPath: databaseURL.path)
+        availability == .available
     }
 
     // MARK: - Public API
@@ -86,6 +143,7 @@ struct VoiceMemosLibrary {
 
     enum LibraryError: LocalizedError, Equatable {
         case databaseMissing
+        case accessDenied(String)
         case openFailed(String)
         case schemaUnsupported
 
@@ -93,6 +151,9 @@ struct VoiceMemosLibrary {
             switch self {
             case .databaseMissing:
                 return "No Voice Memos library was found on this Mac."
+            case .accessDenied:
+                return "Mila can't read your Voice Memos library. Grant Mila Full Disk Access in "
+                    + "System Settings → Privacy & Security → Full Disk Access, then reopen this tab."
             case .openFailed(let msg):
                 return "Could not open the Voice Memos database: \(msg)"
             case .schemaUnsupported:
@@ -246,7 +307,17 @@ struct VoiceMemosLibrary {
     // MARK: - SQLite helpers
 
     private func open() throws -> OpaquePointer {
-        guard isAvailable else { throw LibraryError.databaseMissing }
+        // Distinguish "no library" from "access denied" before touching
+        // SQLite, so callers (and the log) get the right diagnostic instead
+        // of a generic open failure. See issue #45.
+        switch availability {
+        case .available:
+            break
+        case .databaseMissing:
+            throw LibraryError.databaseMissing
+        case .accessDenied(let reason):
+            throw LibraryError.accessDenied(reason)
+        }
         // Read-only, opened by literal path (NOT a `file:` URI — a "?" or "#"
         // in the path would be parsed as URI query/fragment). The DB is
         // WAL-mode and actively written by voicememod; a read-only connection

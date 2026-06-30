@@ -2,10 +2,18 @@ import XCTest
 @testable import Mila
 
 /// Tests for the post-record summarizer that runs whenever the LLM CLI
-/// is configured (not just when Live AI mode was active). End-to-end
-/// invocation uses a shell script masquerading as `claude` so we don't
-/// depend on the user having the real CLI installed — same trick as
-/// `LLMRunnerTests`.
+/// is configured (not just when Live AI mode was active).
+///
+/// End-to-end invocation goes through `RecordingSummarizer`'s injectable
+/// `runLLM` seam (see `RecordingSummarizer.RunLLM`) rather than spawning a
+/// real `claude`/`/bin/sh` subprocess. Earlier revisions wrote a temp shell
+/// script and pointed `LLMSettings.executablePath` at it; under CI
+/// contention the spawn / exec / pipe-drain could hiccup or time out, the
+/// summarizer's `catch` would swallow the error, no summary got written, and
+/// the assertion failed intermittently (e.g. CI run 28448415130). Injecting
+/// a synchronous canned-output closure removes the subprocess-timing
+/// dependency entirely, so these assertions are deterministic by
+/// construction — no real CLI installed, no child process, no flake.
 @MainActor
 final class RecordingSummarizerTests: XCTestCase {
 
@@ -32,6 +40,9 @@ final class RecordingSummarizerTests: XCTestCase {
         liveDefaults = UserDefaults(suiteName: liveSuite)
         llm = LLMSettings(defaults: llmDefaults)
         liveAI = LiveAISettings(defaults: liveDefaults)
+        // Default summarizer uses the production `runLLM` (real CLI). The
+        // gate-only tests below never reach it; the end-to-end tests rebuild
+        // `summarizer` via `useStubRunner` with a deterministic stub.
         summarizer = RecordingSummarizer(store: store,
                                          llmSettings: llm,
                                          liveAISettings: liveAI)
@@ -105,25 +116,17 @@ final class RecordingSummarizerTests: XCTestCase {
                       "Whitespace-only summary should not block regeneration")
     }
 
-    // MARK: - End-to-end via script-as-CLI
+    // MARK: - End-to-end via injected runner
 
     /// Verify the summarizer actually writes the LLM output to the
-    /// recording's `summary` field, and that the sidecar lands too.
-    /// Uses a shell script in place of `claude` so the test runs without
-    /// any real CLI installed.
+    /// recording's `summary` field, and that the sidecar lands too. The
+    /// injected runner returns a canned summary synchronously — no real CLI.
     func test_summarize_stores_output_on_recording_and_writes_sidecar() async throws {
-        let script = makeScript("""
-            #!/bin/sh
-            printf 'A concise summary of the meeting.'
-            """)
-        defer { try? FileManager.default.removeItem(at: script) }
-
         llm.tool = .claude
-        llm.executablePath = script.path
-        // Empty model so we don't pass --model to the script (which
-        // would just be passed through as an arg the script ignores,
-        // but cleaner to keep argv minimal).
         liveAI.model = ""
+        useStubRunner { _, _, _, _, _, _, _ in
+            "A concise summary of the meeting."
+        }
 
         let audioURL = store.freshAudioURL(suggestedName: "Meeting")
         // The audio file needs to exist for `RecordingStore.add` to be
@@ -138,7 +141,7 @@ final class RecordingSummarizerTests: XCTestCase {
         store.add(rec)
 
         summarizer.summarizeIfNeeded(rec)
-        try await waitForSummary(recordingID: rec.id, timeoutSeconds: 120)
+        await summarizer.awaitInFlight(rec.id)
 
         let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertEqual(updated.summary, "A concise summary of the meeting.")
@@ -150,31 +153,31 @@ final class RecordingSummarizerTests: XCTestCase {
     /// The core "right call" assertion: when a transcript is ready, the
     /// summarizer must invoke the configured CLI ONCE, in claude's one-shot
     /// `-p` shape, with the transcript embedded in the prompt via
-    /// `LLMRunner.composedPrompt`. A capturing stub records the exact argv so
-    /// we assert the wire call the app makes — no real model, no API key.
-    /// This is what replaced the old real-Anthropic e2e: instead of asking a
-    /// live model and judging its answer, we verify Mila issues the correct
-    /// invocation off the back of a transcription.
+    /// `LLMRunner.composedPrompt`. The stub reconstructs the exact argv the
+    /// app WOULD have launched — by feeding the prompt/model it was handed
+    /// through `LLMTool.arguments`, the same call the production `runLLM`
+    /// makes — and records it, so we still assert the wire shape without a
+    /// real subprocess. This is what replaced the old real-Anthropic e2e:
+    /// instead of asking a live model and judging its answer, we verify Mila
+    /// issues the correct invocation off the back of a transcription.
     func test_summarize_invokes_cli_with_transcript_in_one_shot_prompt() async throws {
-        let capture = FileManager.default.temporaryDirectory
-            .appendingPathComponent("mila-llm-capture-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: capture) }
-
-        // Stub `claude`: record every argv entry (NUL-separated, so prompts
-        // containing newlines round-trip intact) to the capture file, then
-        // emit a canned summary so the summarizer has output to store. The
-        // capture path is baked into the script body rather than passed via
-        // env, so we don't depend on ProcessInfo.environment snapshotting.
-        let script = makeScript("""
-            #!/bin/sh
-            printf '%s\\0' "$@" > '\(capture.path)'
-            printf 'A concise summary of the meeting.'
-            """)
-        defer { try? FileManager.default.removeItem(at: script) }
-
         llm.tool = .claude
-        llm.executablePath = script.path
         liveAI.model = ""   // keep argv minimal: no --model passthrough
+
+        // Capture the argv the app would have launched. The production
+        // runner (`LLMRunner.run`) composes the user prompt + transcript via
+        // `composedPrompt` BEFORE handing the blob to `LLMTool.arguments`, so
+        // the stub does the same here — that's what embeds the transcript and
+        // the "Transcript:" label into the `-p` argument. Reconstructing the
+        // argv this way proves the one-shot `-p` shape without a subprocess.
+        var capturedArgs: [String] = []
+        var callCount = 0
+        useStubRunner { tool, prompt, transcript, _, model, extraArgs, _ in
+            callCount += 1
+            let composed = LLMRunner.composedPrompt(prompt, transcript: transcript)
+            capturedArgs = tool.arguments(prompt: composed, model: model) + extraArgs
+            return "A concise summary of the meeting."
+        }
 
         let transcript = "we discussed the roadmap and agreed to ship next week"
         let audioURL = store.freshAudioURL(suggestedName: "Call")
@@ -188,20 +191,18 @@ final class RecordingSummarizerTests: XCTestCase {
         store.add(rec)
 
         summarizer.summarizeIfNeeded(rec)
-        try await waitForSummary(recordingID: rec.id, timeoutSeconds: 120)
+        await summarizer.awaitInFlight(rec.id)
 
-        // The CLI ran and its output was stored — proves the call completed.
+        // The CLI ran exactly once and its output was stored.
+        XCTAssertEqual(callCount, 1, "the summarizer must invoke the CLI exactly once")
         let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertEqual(updated.summary, "A concise summary of the meeting.")
 
         // Assert the SHAPE of the call the app made.
-        let data = try XCTUnwrap(try? Data(contentsOf: capture),
-                                 "stub CLI was never invoked — no capture file written")
-        let args = data.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
-        XCTAssertTrue(args.contains("-p"),
-                      "claude must be invoked in one-shot `-p` mode; got argv=\(args)")
-        let prompt = try XCTUnwrap(args.first { $0.contains(transcript) },
-                                   "the transcript must be embedded in the prompt; argv=\(args)")
+        XCTAssertTrue(capturedArgs.contains("-p"),
+                      "claude must be invoked in one-shot `-p` mode; got argv=\(capturedArgs)")
+        let prompt = try XCTUnwrap(capturedArgs.first { $0.contains(transcript) },
+                                   "the transcript must be embedded in the prompt; argv=\(capturedArgs)")
         XCTAssertTrue(prompt.contains("Transcript:"),
                       "prompt should use LLMRunner.composedPrompt's labelled format")
     }
@@ -209,15 +210,10 @@ final class RecordingSummarizerTests: XCTestCase {
     /// Empty CLI output must NOT clobber a (currently nil) summary — we
     /// don't want a wedged CLI to mask the recording as "summarized".
     func test_summarize_drops_empty_output() async throws {
-        let script = makeScript("""
-            #!/bin/sh
-            # Print nothing.
-            true
-            """)
-        defer { try? FileManager.default.removeItem(at: script) }
-
         llm.tool = .claude
-        llm.executablePath = script.path
+        // Stub returns empty output — the production runner trims stdout, so
+        // an empty return models a CLI that printed nothing useful.
+        useStubRunner { _, _, _, _, _, _, _ in "" }
 
         let audioURL = store.freshAudioURL(suggestedName: "Empty")
         try Data("x".utf8).write(to: audioURL)
@@ -230,29 +226,26 @@ final class RecordingSummarizerTests: XCTestCase {
         store.add(rec)
 
         summarizer.summarizeIfNeeded(rec)
-        // Wait long enough for the script to finish, but the summarizer
-        // should leave the recording alone.
-        try await Task.sleep(nanoseconds: 1_000_000_000)
-        // Drain any straggler.
-        try await waitForNoInFlight(recordingID: rec.id, timeoutSeconds: 10)
+        await summarizer.awaitInFlight(rec.id)
 
         let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertNil(updated.summary)
     }
 
-    /// If a live summary lands between enqueue and the CLI returning,
-    /// the summarizer must NOT overwrite it. Simulated by having the
-    /// script sleep for a moment while we patch the store mid-flight.
+    /// If a live summary lands between enqueue and the CLI returning, the
+    /// summarizer must NOT overwrite it. Deterministic: the stub blocks on a
+    /// gate the test opens AFTER patching the store, so the "summary landed
+    /// mid-flight" ordering is guaranteed without any `sleep`.
     func test_summarize_does_not_overwrite_summary_that_landed_mid_flight() async throws {
-        let script = makeScript("""
-            #!/bin/sh
-            sleep 0.5
-            printf 'OVERWRITE'
-            """)
-        defer { try? FileManager.default.removeItem(at: script) }
-
         llm.tool = .claude
-        llm.executablePath = script.path
+
+        let gate = TestGate()
+        useStubRunner { _, _, _, _, _, _, _ in
+            // Block until the test has patched the store, then return the
+            // (now stale) CLI output.
+            await gate.wait()
+            return "OVERWRITE"
+        }
 
         let audioURL = store.freshAudioURL(suggestedName: "Race")
         try Data("x".utf8).write(to: audioURL)
@@ -265,33 +258,34 @@ final class RecordingSummarizerTests: XCTestCase {
         store.add(rec)
 
         summarizer.summarizeIfNeeded(rec)
-        // Patch the store mid-flight to simulate a live summary
-        // landing while the one-shot CLI was still running.
-        try await Task.sleep(nanoseconds: 100_000_000)
+        // The runner is now parked in `gate.wait()`. Patch the store to
+        // simulate a live summary landing while the one-shot CLI was still
+        // running, then release the gate so the runner returns.
+        XCTAssertTrue(summarizer.isSummarizing(rec.id),
+                      "runner should be in flight before we patch the store")
         if var current = store.recordings.first(where: { $0.id == rec.id }) {
             current.summary = "live_summary_from_recording"
             store.update(current)
         }
+        gate.open()
 
-        try await waitForNoInFlight(recordingID: rec.id, timeoutSeconds: 120)
+        await summarizer.awaitInFlight(rec.id)
         let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertEqual(updated.summary, "live_summary_from_recording",
                        "Late-arriving CLI output must not overwrite a summary that already exists")
     }
 
     /// End-to-end: with auto-summary disabled, a freshly transcribed
-    /// recording must be left untouched — the CLI is never invoked and no
-    /// summary lands. The script would write "SHOULD NOT RUN" if reached.
+    /// recording must be left untouched — the runner is never invoked and no
+    /// summary lands.
     func test_summarize_skips_when_auto_summary_disabled() async throws {
-        let script = makeScript("""
-            #!/bin/sh
-            printf 'SHOULD NOT RUN'
-            """)
-        defer { try? FileManager.default.removeItem(at: script) }
-
         llm.tool = .claude
-        llm.executablePath = script.path
         llm.summaryEnabled = false
+        var called = false
+        useStubRunner { _, _, _, _, _, _, _ in
+            called = true
+            return "SHOULD NOT RUN"
+        }
 
         let audioURL = store.freshAudioURL(suggestedName: "Off")
         try Data("x".utf8).write(to: audioURL)
@@ -304,8 +298,12 @@ final class RecordingSummarizerTests: XCTestCase {
         store.add(rec)
 
         summarizer.summarizeIfNeeded(rec)
-        // Give a doomed CLI call time to land if the gate failed.
-        try await Task.sleep(nanoseconds: 500_000_000)
+        // The auto-summary gate is synchronous: a disabled toggle means
+        // `runSummary` is never reached, so no CLI task is ever spawned.
+        XCTAssertFalse(summarizer.isSummarizing(rec.id),
+                       "Disabled auto-summary must not spawn a CLI task")
+        await summarizer.awaitInFlight(rec.id)
+        XCTAssertFalse(called, "the runner must not be invoked while auto-summary is disabled")
         let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertNil(updated.summary,
                      "No summary should be written while auto-summary is disabled")
@@ -315,15 +313,9 @@ final class RecordingSummarizerTests: XCTestCase {
     /// action and must work even when AUTOMATIC summaries are turned off —
     /// the toggle governs the post-recording auto path, not on-demand use.
     func test_regenerate_works_even_when_auto_summary_disabled() async throws {
-        let script = makeScript("""
-            #!/bin/sh
-            printf 'ON DEMAND'
-            """)
-        defer { try? FileManager.default.removeItem(at: script) }
-
         llm.tool = .claude
-        llm.executablePath = script.path
         llm.summaryEnabled = false
+        useStubRunner { _, _, _, _, _, _, _ in "ON DEMAND" }
 
         let audioURL = store.freshAudioURL(suggestedName: "Manual")
         try Data("x".utf8).write(to: audioURL)
@@ -341,9 +333,7 @@ final class RecordingSummarizerTests: XCTestCase {
         store.add(rec)
 
         summarizer.regenerate(rec)
-        try await waitForSummary(recordingID: rec.id,
-                                 timeoutSeconds: 120,
-                                 expected: "ON DEMAND")
+        await summarizer.awaitInFlight(rec.id)
         let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertEqual(updated.summary, "ON DEMAND")
     }
@@ -354,15 +344,15 @@ final class RecordingSummarizerTests: XCTestCase {
     /// whole point of the affordance. Without this the "Regenerate
     /// summary" context-menu item and the re-transcribe hook would both
     /// silently no-op.
+    ///
+    /// This is the test that was flaky on CI: previously it spawned a real
+    /// `/bin/sh` script via the CLI runner and asserted on the result, so a
+    /// subprocess hiccup made the summary fail to land. With the injected
+    /// runner there's no subprocess — the canned "REGENERATED" is returned
+    /// synchronously and the assertion is deterministic.
     func test_regenerate_overwrites_existing_summary() async throws {
-        let script = makeScript("""
-            #!/bin/sh
-            printf 'REGENERATED'
-            """)
-        defer { try? FileManager.default.removeItem(at: script) }
-
         llm.tool = .claude
-        llm.executablePath = script.path
+        useStubRunner { _, _, _, _, _, _, _ in "REGENERATED" }
 
         let audioURL = store.freshAudioURL(suggestedName: "Regen")
         try Data("x".utf8).write(to: audioURL)
@@ -378,9 +368,7 @@ final class RecordingSummarizerTests: XCTestCase {
         // `summarizeIfNeeded` would bail because a summary already
         // exists; `regenerate` bypasses that gate.
         summarizer.regenerate(rec)
-        try await waitForSummary(recordingID: rec.id,
-                                 timeoutSeconds: 120,
-                                 expected: "REGENERATED")
+        await summarizer.awaitInFlight(rec.id)
         let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertEqual(updated.summary, "REGENERATED")
     }
@@ -389,6 +377,12 @@ final class RecordingSummarizerTests: XCTestCase {
     /// LLM configured + non-empty transcript.
     func test_regenerate_noops_when_llm_not_configured() async throws {
         llm.tool = .none
+        var called = false
+        useStubRunner { _, _, _, _, _, _, _ in
+            called = true
+            return "should not reach here"
+        }
+
         let audioURL = store.freshAudioURL(suggestedName: "NoLLM")
         try Data("x".utf8).write(to: audioURL)
         var rec = Recording(
@@ -401,20 +395,22 @@ final class RecordingSummarizerTests: XCTestCase {
         store.add(rec)
 
         summarizer.regenerate(rec)
-        // Give it a beat — nothing should have happened.
-        try await Task.sleep(nanoseconds: 200_000_000)
+        // The gate is synchronous: an unconfigured LLM means no task is spawned.
+        XCTAssertFalse(summarizer.isSummarizing(rec.id),
+                       "regenerate must not spawn a task when the LLM is unconfigured")
+        await summarizer.awaitInFlight(rec.id)
+        XCTAssertFalse(called, "the runner must not be invoked when the LLM is unconfigured")
         let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertEqual(updated.summary, "old summary")
     }
 
     func test_regenerate_noops_when_transcript_empty() async throws {
         llm.tool = .claude
-        let script = makeScript("""
-            #!/bin/sh
-            printf 'should not reach here'
-            """)
-        defer { try? FileManager.default.removeItem(at: script) }
-        llm.executablePath = script.path
+        var called = false
+        useStubRunner { _, _, _, _, _, _, _ in
+            called = true
+            return "should not reach here"
+        }
 
         let audioURL = store.freshAudioURL(suggestedName: "Empty")
         try Data("x".utf8).write(to: audioURL)
@@ -428,7 +424,11 @@ final class RecordingSummarizerTests: XCTestCase {
         store.add(rec)
 
         summarizer.regenerate(rec)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        // The gate is synchronous: an empty transcript means no task is spawned.
+        XCTAssertFalse(summarizer.isSummarizing(rec.id),
+                       "regenerate must not spawn a task for an empty transcript")
+        await summarizer.awaitInFlight(rec.id)
+        XCTAssertFalse(called, "the runner must not be invoked for an empty transcript")
         let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertEqual(updated.summary, "old",
                        "Empty transcript must not trigger a CLI call")
@@ -436,16 +436,15 @@ final class RecordingSummarizerTests: XCTestCase {
 
     /// `isSummarizing(_:)` flips true while a call is in flight and back
     /// to false when it lands. The detail view's spinner depends on this.
+    /// Deterministic: the stub parks on a gate the test opens, so the
+    /// in-flight window is observed without timing on a `sleep`.
     func test_is_summarizing_tracks_in_flight_state() async throws {
-        let script = makeScript("""
-            #!/bin/sh
-            sleep 0.3
-            printf 'done'
-            """)
-        defer { try? FileManager.default.removeItem(at: script) }
-
         llm.tool = .claude
-        llm.executablePath = script.path
+        let gate = TestGate()
+        useStubRunner { _, _, _, _, _, _, _ in
+            await gate.wait()
+            return "done"
+        }
 
         let audioURL = store.freshAudioURL(suggestedName: "Spin")
         try Data("x".utf8).write(to: audioURL)
@@ -459,70 +458,52 @@ final class RecordingSummarizerTests: XCTestCase {
 
         XCTAssertFalse(summarizer.isSummarizing(rec.id))
         summarizer.summarizeIfNeeded(rec)
-        // Yield so the Task body actually starts and registers itself.
-        try await Task.sleep(nanoseconds: 50_000_000)
+        // `inFlightIDs.insert` runs synchronously inside `summarizeIfNeeded`
+        // (before the Task is even created), so the flag is true the instant
+        // the call returns — and the runner is parked on the gate.
         XCTAssertTrue(summarizer.isSummarizing(rec.id),
                       "isSummarizing should be true while CLI is running")
 
-        try await waitForSummary(recordingID: rec.id, timeoutSeconds: 120)
+        // Release the runner and await the real task completion.
+        gate.open()
+        await summarizer.awaitInFlight(rec.id)
         XCTAssertFalse(summarizer.isSummarizing(rec.id),
                        "isSummarizing should clear after CLI returns")
     }
 
     // MARK: - Helpers
 
-    /// Poll the store until the recording's `summary` is non-nil, or fail
-    /// if it doesn't land in the given window. Script-as-CLI tests can
-    /// take a couple of seconds on a cold runner (subprocess spawn +
-    /// pipe drain) so the default 30s budget is generous.
-    private func waitForSummary(recordingID: UUID,
-                                timeoutSeconds: TimeInterval,
-                                expected: String? = nil) async throws {
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
-        while Date() < deadline {
-            if let rec = store.recordings.first(where: { $0.id == recordingID }),
-               let s = rec.summary, !s.isEmpty {
-                if let expected {
-                    // Caller wants to wait for a specific replacement
-                    // value (regenerate path) rather than "any non-empty
-                    // summary" (initial run path). Without this the
-                    // regenerate test would short-circuit on the OLD
-                    // summary present before regenerate() even started.
-                    if s == expected { return }
-                } else {
-                    return
-                }
-            }
-            try await Task.sleep(nanoseconds: 50_000_000)
-        }
-        XCTFail("Timed out waiting for summary on \(recordingID)")
+    /// Rebuild `summarizer` with a deterministic `runLLM` stub so the
+    /// end-to-end tests don't depend on a real subprocess. Call after
+    /// configuring `llm` / `liveAI` for the test.
+    private func useStubRunner(_ run: @escaping RecordingSummarizer.RunLLM) {
+        summarizer = RecordingSummarizer(store: store,
+                                         llmSettings: llm,
+                                         liveAISettings: liveAI,
+                                         runLLM: run)
+    }
+}
+
+/// A one-shot async gate for deterministically ordering a stubbed runner
+/// against the test body — the stub awaits `wait()`, the test calls `open()`
+/// once it has set up the mid-flight condition. Replaces `sleep`-based
+/// ordering, which slipped under CI contention. Main-actor isolated because
+/// the summarizer and tests both run on the main actor.
+@MainActor
+final class TestGate {
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+    private var isOpen = false
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { continuations.append($0) }
     }
 
-    /// Wait for the summarizer's in-flight bookkeeping to clear — used
-    /// when we EXPECT no summary to land (so we can't just wait for one).
-    private func waitForNoInFlight(recordingID: UUID,
-                                   timeoutSeconds: TimeInterval) async throws {
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
-        while Date() < deadline {
-            // The summarizer exposes no public introspection of its
-            // task table — best proxy is "calling summarizeIfNeeded a
-            // second time was a no-op because the first was still
-            // running." Easier: just give the scripted CLI long
-            // enough to finish.
-            try await Task.sleep(nanoseconds: 100_000_000)
-            // If the script has already exited, the task in `inFlight`
-            // will have cleared itself in the `defer` block.
-            return
-        }
-    }
-
-    private func makeScript(_ body: String) -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("mila-summarizer-test-\(UUID().uuidString).sh")
-        try? body.write(to: url, atomically: true, encoding: .utf8)
-        try? FileManager.default.setAttributes(
-            [.posixPermissions: 0o755], ofItemAtPath: url.path
-        )
-        return url
+    func open() {
+        guard !isOpen else { return }
+        isOpen = true
+        let pending = continuations
+        continuations.removeAll()
+        for c in pending { c.resume() }
     }
 }

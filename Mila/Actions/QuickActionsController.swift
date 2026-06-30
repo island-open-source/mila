@@ -165,6 +165,14 @@ final class QuickActionsController: ObservableObject {
     /// we never fire the warning for a recording that's already over.
     private var silenceWatchTask: Task<Void, Never>?
 
+    /// Active record-start remote-backend probe (see `startRecording`).
+    /// Single-owner: superseded when a new recording starts and cancelled
+    /// when one stops, so an older probe — whose `GET /models` is still in
+    /// flight against the same unchanged config (which `testConnection()`
+    /// can't detect as stale) — can't land an out-of-order failure into
+    /// `lastError`/`testStatus` after the user already moved on.
+    private var remoteProbeTask: Task<Void, Never>?
+
     /// Background finalize tasks, keyed by the recording id they're
     /// finalizing. After `stopRecording` drains the live pipeline and
     /// frees the record button, the HEAVY tail of finalization — the
@@ -366,6 +374,7 @@ final class QuickActionsController: ObservableObject {
             activeJob = .recording(withSystemAudio: withSystemAudio)
             sleepGuard.preventIdleSleep(reason: "Mila is recording")
             startSilenceWatch(watching: source)
+            armRemoteProbe()
         } catch SystemAudioRecorder.CaptureError.permissionDenied {
             screenRecordingPermissionMissing = true
         } catch {
@@ -455,6 +464,7 @@ final class QuickActionsController: ObservableObject {
             activeJob = .recordingApp(processID: app?.processID, includeMic: includeMic)
             sleepGuard.preventIdleSleep(reason: "Mila is recording")
             startSilenceWatch(watching: source)
+            armRemoteProbe()
         } catch SystemAudioRecorder.CaptureError.permissionDenied {
             screenRecordingPermissionMissing = true
         } catch {
@@ -463,6 +473,30 @@ final class QuickActionsController: ObservableObject {
             } else {
                 transcription.lastError = "Could not start app recording: \(error.localizedDescription)"
             }
+        }
+    }
+
+    /// Proactively verify a remote transcription backend now that capture is
+    /// live. A bad key / unreachable endpoint otherwise stays invisible: the
+    /// live path silently drops every utterance and the error only appears on
+    /// the Stop batch pass (the user recorded a whole meeting before learning
+    /// it failed). Non-blocking — recording already started and audio is being
+    /// saved; this just races an error banner to the user. No-op for the local
+    /// backend. Single-owner: cancel any prior probe so its (possibly stale)
+    /// result can't overwrite UI state for this newer recording. Called from
+    /// every record-start entry point (mic/meeting and app-audio) so no live
+    /// path can fail silently. Cancelled in `stopRecording()`.
+    private func armRemoteProbe() {
+        remoteProbeTask?.cancel()
+        remoteProbeTask = Task { [transcription] in
+            // `cancel()` above is cooperative, so a just-superseded probe can
+            // still get scheduled. Bail before touching `transcription` —
+            // `probeRemoteBackendIfActive()`'s active-but-unconfigured branch
+            // writes `lastError` synchronously, before any await/cancellation
+            // check, so without this guard a stale probe could surface an
+            // error for a recording the user has already moved past.
+            guard !Task.isCancelled else { return }
+            await transcription.probeRemoteBackendIfActive()
         }
     }
 
@@ -485,6 +519,10 @@ final class QuickActionsController: ObservableObject {
         // user already stopped (especially common for sub-10s recordings).
         silenceWatchTask?.cancel()
         silenceWatchTask = nil
+        // Cancel any in-flight record-start remote probe for the same reason:
+        // its failure result must not land after the recording is over.
+        remoteProbeTask?.cancel()
+        remoteProbeTask = nil
         // Release the sleep assertion as soon as the engine is shutting
         // down — keeping it past `stop()` would block idle sleep while
         // the user is just looking at the rename sheet.

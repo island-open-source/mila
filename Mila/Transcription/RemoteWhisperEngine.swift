@@ -5,6 +5,17 @@ import TranscriptionCore
 private let remoteLog = Logger(subsystem: "io.island.whisper.IslandWhisper",
                                category: "RemoteWhisperEngine")
 
+/// Injection seam for `TranscriptionService`: the remote engine refines
+/// `TranscribingEngine` with the remote-specific `configure(_:)` step the
+/// service calls before each run. Pulling it behind a protocol lets tests
+/// substitute an engine that fails deterministically (e.g. a simulated HTTP
+/// 401) without a real network round-trip — which is exactly the failure mode
+/// that previously went uncaught (a misconfigured remote key silently emptied
+/// the live transcript). `RemoteWhisperEngine` is the only production conformer.
+protocol RemoteTranscribing: TranscribingEngine {
+    func configure(_ config: RemoteTranscriptionConfig) async
+}
+
 /// A `TranscribingEngine` that offloads transcription to an OpenAI-compatible
 /// `/v1/audio/transcriptions` endpoint instead of running whisper.cpp locally.
 ///
@@ -18,7 +29,7 @@ private let remoteLog = Logger(subsystem: "io.island.whisper.IslandWhisper",
 /// Config (endpoint, key, model) is injected via `configure(_:)` before each
 /// transcription — the protocol's `transcribe` signature is fixed by the local
 /// engine, so the remote-specific bits ride alongside on the actor's state.
-actor RemoteWhisperEngine: TranscribingEngine {
+actor RemoteWhisperEngine: RemoteTranscribing {
     enum RemoteError: LocalizedError {
         case notConfigured
         case http(status: Int, body: String)

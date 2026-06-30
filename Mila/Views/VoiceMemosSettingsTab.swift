@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Settings → Voice Memos. Lets the user sync recordings made on their iPhone
 /// (synced to this Mac via iCloud) into Mila, picking which Voice Memos
@@ -25,11 +26,16 @@ struct VoiceMemosSettingsTab: View {
             Toggle("Sync recordings from iPhone Voice Memos", isOn: $settings.isEnabled)
                 .toggleStyle(.switch)
 
-            if !library.isAvailable {
+            switch library.availability {
+            case .available:
+                if settings.isEnabled {
+                    folderPicker
+                    statusFooter
+                }
+            case .databaseMissing:
                 unavailableNotice
-            } else if settings.isEnabled {
-                folderPicker
-                statusFooter
+            case .accessDenied:
+                accessDeniedNotice
             }
             Spacer()
         }
@@ -63,6 +69,30 @@ struct VoiceMemosSettingsTab: View {
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
+    }
+
+    /// Shown when the Voice Memos DB exists but macOS blocked access. Mila is
+    /// not sandboxed, so reading the Voice Memos group container needs Full
+    /// Disk Access — point the user straight at the right pane (issue #45).
+    private var accessDeniedNotice: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "lock.shield")
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Mila can't read your Voice Memos library. macOS needs you to grant "
+                     + "Mila Full Disk Access, then reopen this tab.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Open Full Disk Access Settings…") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.08)))
     }
 
     private var folderPicker: some View {

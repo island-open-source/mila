@@ -23,6 +23,7 @@ final class LiveTranscriberSpeakerLabelTests: XCTestCase {
             diarizationSettings: DiarizationSettings(
                 defaults: .init(suiteName: "LiveTranscriberSpeakerLabelTests")!
             ),
+            remoteSettings: TestSupport.isolatedRemoteSettings(label: "LiveTranscriberSpeakerLabelTests"),
             engine: StubWhisperEngine()
         )
         return LiveTranscriber(transcription: service)

@@ -30,6 +30,7 @@ final class TranscriptionServicePrewarmTests: XCTestCase {
             store: store,
             modelManager: manager,
             diarizationSettings: DiarizationSettings(defaults: .init(suiteName: "TranscriptionServicePrewarmTests.diarization")!),
+            remoteSettings: TestSupport.isolatedRemoteSettings(label: "TranscriptionServicePrewarmTests"),
             engine: stub
         )
     }

@@ -36,7 +36,7 @@ final class QuickActionsControllerTests: XCTestCase {
         try TestSupport.installFakeModel(into: manager)
 
         stub = StubWhisperEngine()
-        service = TranscriptionService(store: store, modelManager: manager, diarizationSettings: DiarizationSettings(defaults: .init(suiteName: "QuickActionsControllerTests.diarization")!), engine: stub)
+        service = TranscriptionService(store: store, modelManager: manager, diarizationSettings: DiarizationSettings(defaults: .init(suiteName: "QuickActionsControllerTests.diarization")!), remoteSettings: TestSupport.isolatedRemoteSettings(label: "QuickActionsControllerTests"), engine: stub)
         session = RecordingSession()
         UserDefaults().removePersistentDomain(forName: languageSuite)
         languageDefaults = UserDefaults(suiteName: languageSuite)

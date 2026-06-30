@@ -227,9 +227,22 @@ final class RecordingStore: ObservableObject {
             return
         }
         // Re-fetch by id: the recording may have been edited/removed during
-        // the (off-main) encode. Only swap if it's still the same WAV.
+        // the (off-main) encode. Only swap if it's still the same WAV AND it's
+        // still `.completed`.
+        //
+        // The status re-check closes a race with re-transcription: the user can
+        // right-click "Re-transcribe" on a recording whose post-completion
+        // compression is still in flight. That re-enqueues it and the worker
+        // flips it back to `.running` (synchronously, before it reads the audio
+        // — see `TranscriptionService.process`). If we deleted the source WAV
+        // here while that pass is reading it, the re-transcribe would fail with
+        // "file not found" and the recording would be stuck `.failed` with the
+        // OLD transcript. By bailing when the status is no longer `.completed`,
+        // we leave the WAV untouched for the in-flight pass; that pass will
+        // re-spawn compression when it finishes.
         guard let idx = recordings.firstIndex(where: { $0.id == id }),
-              recordings[idx].audioFileName == rec.audioFileName else {
+              recordings[idx].audioFileName == rec.audioFileName,
+              recordings[idx].status == .completed else {
             try? FileManager.default.removeItem(at: dst)
             return
         }
@@ -305,6 +318,30 @@ final class RecordingStore: ObservableObject {
         writeTranscript(for: recording)
         writeSummary(for: recording)
         persist()
+    }
+
+    /// Flip a recording into `.pending` (optionally switching its transcription
+    /// `language`) and return the CURRENT store record, ready to hand to
+    /// `TranscriptionService.enqueue`.
+    ///
+    /// Why this exists instead of the callers doing `var copy = recording;
+    /// copy.language = …; store.update(copy)`: the `recording` a SwiftUI
+    /// context menu has captured can be a STALE snapshot. In particular its
+    /// `audioFileName` may still be the original `.wav` even though the
+    /// post-completion compression has since renamed the file to `.m4a` and
+    /// deleted the WAV. `update`-ing that stale copy would clobber the store's
+    /// correct `.m4a` name back to the dead `.wav`, and the re-transcribe pass
+    /// would then fail with "file not found" — landing `.failed` with the OLD
+    /// transcript still showing. (This was a flaky-CI / real-world re-transcribe
+    /// bug.) By mutating ONLY `language` + `status` on the live record we keep
+    /// the store-owned `audioFileName` intact. Returns nil if the recording is
+    /// gone.
+    func prepareForRetranscription(id: UUID, language: String? = nil) -> Recording? {
+        guard let idx = recordings.firstIndex(where: { $0.id == id }) else { return nil }
+        if let language { recordings[idx].language = language }
+        recordings[idx].status = .pending
+        persist()
+        return recordings[idx]
     }
 
     /// Rename a recording's user-facing title. No-op if the trimmed title is

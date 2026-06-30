@@ -29,6 +29,34 @@ final class RecordingSummarizer: ObservableObject {
     private let llmSettings: LLMSettings
     private let liveAISettings: LiveAISettings
 
+    /// The LLM invocation, behind a seam so tests don't have to spawn a
+    /// real subprocess. Production wires this to `LLMRunner.run`, which
+    /// shells out to the configured `claude` / `cursor-agent` CLI. Tests
+    /// inject a closure that returns canned output synchronously, so the
+    /// summarizer's store-write logic is exercised without depending on
+    /// process spawn / exec / pipe-drain timing — the source of the
+    /// residual CI flake (the assertion lands deterministically because no
+    /// child process is involved). The closure receives the same arguments
+    /// the summarizer would have forwarded to the CLI, so a test can still
+    /// assert on the wire shape (e.g. the one-shot `-p` prompt built by
+    /// `LLMTool.arguments`) by inspecting them directly instead of
+    /// capturing a shell script's argv.
+    ///
+    /// `@MainActor` so a test stub can read/write main-actor-isolated test
+    /// fixtures (e.g. capture the argv it was handed) without Sendable
+    /// gymnastics — the whole summarizer already runs on the main actor.
+    typealias RunLLM = @MainActor (
+        _ tool: LLMTool,
+        _ prompt: String,
+        _ transcript: String,
+        _ executablePathOverride: String?,
+        _ model: String?,
+        _ extraArgs: [String],
+        _ timeout: TimeInterval
+    ) async throws -> String
+
+    private let runLLM: RunLLM
+
     /// Background work tracked per-recording so a second `summarizeIfNeeded`
     /// call for the same id (e.g. a re-transcribe trigger) doesn't spawn
     /// two overlapping CLI invocations.
@@ -61,12 +89,28 @@ final class RecordingSummarizer: ObservableObject {
     /// so it follows the user's preference set in Settings → LLM.
     var timeoutSeconds: TimeInterval { llmSettings.cliTimeout }
 
+    /// `runLLM` defaults to the real CLI invocation (`LLMRunner.run`).
+    /// Tests pass a deterministic stub to remove the subprocess-timing
+    /// dependency. The default forwards exactly the arguments
+    /// `runSummary` collects so production behaviour is unchanged.
     init(store: RecordingStore,
          llmSettings: LLMSettings,
-         liveAISettings: LiveAISettings) {
+         liveAISettings: LiveAISettings,
+         runLLM: @escaping RunLLM = { tool, prompt, transcript, executableOverride, model, extraArgs, timeout in
+             try await LLMRunner.run(
+                 tool: tool,
+                 prompt: prompt,
+                 transcript: transcript,
+                 executablePathOverride: executableOverride,
+                 model: model,
+                 extraArgs: extraArgs,
+                 timeout: timeout
+             )
+         }) {
         self.store = store
         self.llmSettings = llmSettings
         self.liveAISettings = liveAISettings
+        self.runLLM = runLLM
 
         // Backfill on off→on transitions of LLM configured-ness. The
         // `tool` property is the only one that affects `isConfigured`
@@ -123,6 +167,20 @@ final class RecordingSummarizer: ObservableObject {
     /// summary section.
     func isSummarizing(_ recordingID: UUID) -> Bool {
         inFlightIDs.contains(recordingID)
+    }
+
+    /// Await the in-flight summary task for `recordingID`, if one is running.
+    /// Returns immediately when nothing is in flight (already finished, or
+    /// never started). Test seam: lets tests wait on the REAL completion
+    /// signal — the underlying `Task` finishing — instead of polling the
+    /// store on a timer. Polling is inherently racy under CI contention (the
+    /// subprocess spawn + pipe drain can slip past a fixed window); awaiting
+    /// the task itself is deterministic. The task clears its own `inFlight`
+    /// entry in a `defer`, so by the time this returns the store write (if any)
+    /// has already happened.
+    func awaitInFlight(_ recordingID: UUID) async {
+        guard let task = inFlight[recordingID] else { return }
+        await task.value
     }
 
     // MARK: - Public API
@@ -273,6 +331,11 @@ final class RecordingSummarizer: ObservableObject {
         let transcript = recording.fullText
         let timeout = timeoutSeconds
         let startedAt = Date()
+        // Captured strongly: the runner closure holds no reference to
+        // `self`, so this can't create a retain cycle, and capturing it
+        // here means the call below doesn't depend on `self` still being
+        // alive when the LLM returns.
+        let runLLM = self.runLLM
 
         inFlightIDs.insert(id)
         summarizerLog.log("started \(self.shortID(id), privacy: .public) transcript=\(transcript.count, privacy: .public)c force=\(force, privacy: .public)")
@@ -293,14 +356,17 @@ final class RecordingSummarizer: ObservableObject {
                 }
             }
             do {
-                let raw = try await LLMRunner.run(
-                    tool: tool,
-                    prompt: prompt,
-                    transcript: transcript,
-                    executablePathOverride: executableOverride,
-                    model: model.isEmpty ? nil : model,
-                    extraArgs: extraArgs,
-                    timeout: timeout
+                // Routed through the injected `runLLM` seam (defaults to
+                // `LLMRunner.run`) so tests can return canned output without
+                // spawning a real CLI subprocess.
+                let raw = try await runLLM(
+                    tool,
+                    prompt,
+                    transcript,
+                    executableOverride,
+                    model.isEmpty ? nil : model,
+                    extraArgs,
+                    timeout
                 )
                 let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !cleaned.isEmpty else {

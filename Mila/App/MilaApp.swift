@@ -345,6 +345,18 @@ struct MilaApp: App {
         } else if CommandLine.arguments.contains("--ui-test-recording-lang-he") {
             langSettings.current = .hebrew
         }
+        // Force the "All Transcriptions" sidebar section EXPANDED when seeding
+        // a recording for UI tests. `sidebar.allTranscriptions.expanded` is
+        // @AppStorage-backed and is NOT reset by `--ui-test-clean-store` (that
+        // only swaps the recordings store), so its value leaks across runs and
+        // the seeded recording's inline row was present or absent
+        // nondeterministically. Pinning it true makes
+        // `sidebar.recording.Seed Recording` deterministically reachable, which
+        // removes the select-vs-expand flake in
+        // `DetailLayoutUITests.test_recording_detail_renders_within_window_bounds`.
+        if CommandLine.arguments.contains("--ui-test-seed-recording") {
+            UserDefaults.standard.set(true, forKey: "sidebar.allTranscriptions.expanded")
+        }
         // CI E2E: point LLMSettings at a Claude CLI installed on the
         // runner. With ANTHROPIC_API_KEY set in the env, the CLI
         // authenticates non-interactively and Live AI's session loop

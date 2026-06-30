@@ -5,10 +5,14 @@ import XCTest
 /// runs on launch + on LLM-config flip and walks the store generating
 /// summaries for recordings that don't have one yet.
 ///
-/// All end-to-end calls go through a shell script masquerading as
-/// `claude`, same trick as `RecordingSummarizerTests`. The script writes
-/// a probe file on each invocation so we can count concurrency
-/// independently of the summarizer's own internal counters.
+/// All end-to-end calls go through `RecordingSummarizer`'s injectable
+/// `runLLM` seam (see `RecordingSummarizer.RunLLM`) instead of spawning a
+/// real `claude`/`/bin/sh` subprocess — same rationale as
+/// `RecordingSummarizerTests`: the real-subprocess path was the source of CI
+/// flake under contention. The stub returns canned output synchronously, and
+/// the concurrency / ordering assertions are driven by an in-process
+/// `ConcurrencyProbe` (a gate + counter) rather than by probe files written
+/// from shell scripts, so they're deterministic.
 @MainActor
 final class RecordingSummarizerBackfillTests: XCTestCase {
 
@@ -35,6 +39,8 @@ final class RecordingSummarizerBackfillTests: XCTestCase {
         liveDefaults = UserDefaults(suiteName: liveSuite)
         llm = LLMSettings(defaults: llmDefaults)
         liveAI = LiveAISettings(defaults: liveDefaults)
+        // Built with the production runner by default; each test that drives
+        // end-to-end work rebuilds it via `useStubRunner` with a stub.
         summarizer = RecordingSummarizer(store: store,
                                          llmSettings: llm,
                                          liveAISettings: liveAI)
@@ -53,14 +59,8 @@ final class RecordingSummarizerBackfillTests: XCTestCase {
     /// skips the rest. Verifies the four criteria from the spec all in
     /// one go so a future regression that loosens any of them is caught.
     func test_backfill_only_targets_completed_non_trashed_missing_summary() async throws {
-        let script = makeScript("""
-            #!/bin/sh
-            printf 'FILLED'
-            """)
-        defer { try? FileManager.default.removeItem(at: script) }
-
         llm.tool = .claude
-        llm.executablePath = script.path
+        useStubRunner { _, _, _, _, _, _, _ in "FILLED" }
 
         // Eligible: completed, non-empty text, no summary, not trashed.
         let target = try addRecording(title: "Target",
@@ -91,9 +91,9 @@ final class RecordingSummarizerBackfillTests: XCTestCase {
                              summary: nil)
 
         summarizer.backfillIfNeeded()
-        try await waitForSummary(recordingID: target.id, timeoutSeconds: 120)
+        try await waitForSummary(recordingID: target.id)
 
-        // The eligible one got the script's output.
+        // The eligible one got the stub's output.
         XCTAssertEqual(currentSummary(of: target.id), "FILLED")
         // The already-summarized one was left alone.
         XCTAssertEqual(currentSummary(of: alreadySummarized.id), "already here")
@@ -107,14 +107,24 @@ final class RecordingSummarizerBackfillTests: XCTestCase {
     /// dedicated test below.
     func test_backfill_noops_when_llm_not_configured() async throws {
         llm.tool = .none
+        var called = false
+        useStubRunner { _, _, _, _, _, _, _ in
+            called = true
+            return "NOPE"
+        }
 
         let rec = try addRecording(title: "Skip",
                                    status: .completed,
                                    fullText: "transcript",
                                    summary: nil)
 
+        // `backfillIfNeeded` gates on `isConfigured` synchronously, so no
+        // task is ever spawned — assert that directly, no sleep needed.
         summarizer.backfillIfNeeded()
-        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertFalse(summarizer.isSummarizing(rec.id),
+                       "backfill must not spawn a task when the LLM is unconfigured")
+        await summarizer.awaitInFlight(rec.id)
+        XCTAssertFalse(called, "the runner must not be invoked when the LLM is unconfigured")
         XCTAssertNil(currentSummary(of: rec.id))
     }
 
@@ -124,11 +134,7 @@ final class RecordingSummarizerBackfillTests: XCTestCase {
     /// to relaunch the app or wait for a fresh recording to see summaries
     /// fill in.
     func test_backfill_runs_on_llm_config_flip() async throws {
-        let script = makeScript("""
-            #!/bin/sh
-            printf 'AUTO'
-            """)
-        defer { try? FileManager.default.removeItem(at: script) }
+        useStubRunner { _, _, _, _, _, _, _ in "AUTO" }
 
         // LLM starts unconfigured.
         XCTAssertEqual(llm.tool, .none)
@@ -139,46 +145,28 @@ final class RecordingSummarizerBackfillTests: XCTestCase {
                                    summary: nil)
 
         // Now configure — the `$tool` publisher in the summarizer should
-        // notice and kick a backfill.
-        llm.executablePath = script.path
+        // notice and kick a backfill. The sink hops through
+        // `DispatchQueue.main` (see RecordingSummarizer.init), so the
+        // summary task is created on a later main tick; await its landing.
         llm.tool = .claude
 
-        try await waitForSummary(recordingID: rec.id, timeoutSeconds: 120)
+        try await waitForSummary(recordingID: rec.id)
         XCTAssertEqual(currentSummary(of: rec.id), "AUTO")
     }
 
     // MARK: - Throttle + ordering
 
     /// With N candidates and `maxConcurrent` = 2, at no point should more
-    /// than 2 CLI subprocesses be running at the same time. The script
-    /// records each entry / exit in a probe directory so the test can
-    /// count concurrent presence without depending on summarizer
-    /// internals.
+    /// than 2 stub invocations be running at the same time. The probe
+    /// counts concurrent presence in-process (no shell script, no probe
+    /// files) and parks each call on a gate so overlap is forced and
+    /// observable.
     func test_backfill_throttles_to_max_concurrent() async throws {
-        let probeDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("backfill-probe-\(UUID().uuidString)",
-                                    isDirectory: true)
-        try FileManager.default.createDirectory(at: probeDir,
-                                                withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: probeDir) }
-
-        // The script creates a file at $PROBE_DIR/<unique>.run on entry
-        // and removes it on exit, sleeping in between so the test has a
-        // long enough window to sample the concurrent count multiple
-        // times. We can't use a single file because two processes would
-        // race; per-invocation unique names sidestep that.
-        let script = makeScript("""
-            #!/bin/sh
-            UNIQ=$$.$RANDOM
-            touch "\(probeDir.path)/$UNIQ.run"
-            sleep 0.4
-            rm -f "\(probeDir.path)/$UNIQ.run"
-            printf 'DONE'
-            """)
-        defer { try? FileManager.default.removeItem(at: script) }
-
-        llm.tool = .claude
-        llm.executablePath = script.path
+        let probe = ConcurrencyProbe()
+        useStubRunner { _, _, _, _, _, _, _ in
+            await probe.enterAndWait()
+            return "DONE"
+        }
 
         // 5 candidates — comfortably above the cap.
         var recs: [Recording] = []
@@ -190,70 +178,48 @@ final class RecordingSummarizerBackfillTests: XCTestCase {
             recs.append(r)
         }
 
+        llm.tool = .claude
         summarizer.maxConcurrent = 2
         summarizer.backfillIfNeeded()
 
-        // Sample concurrent .run files frequently for ~3 s. Worst-case
-        // total wall time is 5 * 0.4 / 2 = 1.0 s with perfect packing;
-        // 3 s gives plenty of slack on a noisy CI runner.
-        var maxObserved = 0
-        let stopAt = Date().addingTimeInterval(3.0)
-        while Date() < stopAt {
-            let count = (try? FileManager.default
-                .contentsOfDirectory(at: probeDir,
-                                     includingPropertiesForKeys: nil))?
-                .filter { $0.pathExtension == "run" }.count ?? 0
-            maxObserved = max(maxObserved, count)
-            try await Task.sleep(nanoseconds: 25_000_000)
-            // Bail early once all 5 have landed so the test isn't pinned
-            // to the full 3 s when the runner is fast.
-            let summarized = recs.filter {
-                (currentSummary(of: $0.id) ?? "").isEmpty == false
-            }.count
-            if summarized == recs.count { break }
-        }
+        // Exactly `maxConcurrent` calls should be parked at the peak. Wait
+        // for the first wave to fill the cap, then assert it never exceeded.
+        await probe.waitUntilCurrent(2)
+        XCTAssertEqual(probe.maxObserved, 2,
+                       "Backfill should run exactly 2 concurrently at the cap (saw \(probe.maxObserved))")
 
-        XCTAssertLessThanOrEqual(maxObserved, 2,
-                                 "Backfill should cap concurrent CLI calls at 2 (saw \(maxObserved))")
-
-        // And every candidate eventually got a summary.
+        // Release everything; subsequent waves pass straight through the
+        // (now-open) gate. The cap still holds because the summarizer never
+        // starts more than `maxConcurrent` tasks at once. Drain via a
+        // bounded poll: later candidates are still in `backfillQueue` (no
+        // in-flight task to await yet), and `pumpBackfill` only promotes
+        // them as earlier ones finish.
+        probe.releaseAll()
         for rec in recs {
-            try await waitForSummary(recordingID: rec.id, timeoutSeconds: 120)
+            try await waitForSummary(recordingID: rec.id)
+            XCTAssertEqual(currentSummary(of: rec.id), "DONE")
         }
+        XCTAssertLessThanOrEqual(probe.maxObserved, 2,
+                                 "Concurrency cap must hold across the whole batch (saw \(probe.maxObserved))")
     }
 
     /// Process newest-first so the recording the user just finished
-    /// gets attention before the months-old archive. We pace the script
-    /// down to one-at-a-time concurrency for this assertion so the
-    /// ordering is observable; with parallel calls "first started" is
-    /// the wrong question.
+    /// gets attention before the months-old archive. We pace down to
+    /// one-at-a-time concurrency so the ordering is observable; with
+    /// parallel calls "first started" is the wrong question.
     func test_backfill_processes_newest_first() async throws {
-        let order = FileManager.default.temporaryDirectory
-            .appendingPathComponent("backfill-order-\(UUID().uuidString).log")
-        // Each invocation appends its first CLI arg (which becomes our
-        // recording title via the transcript). Using `printf '%s\\n'`
-        // keeps the file readable.
-        let script = makeScript("""
-            #!/bin/sh
-            # The transcript text is the only thing that varies between
-            # our recordings — grep MARKER_<KEY> out of whichever arg
-            # carries the prompt blob and log it.
-            for arg in "$@"; do
-              case "$arg" in
-                *MARKER_OLD*) echo MARKER_OLD >> "\(order.path)" ;;
-                *MARKER_MID*) echo MARKER_MID >> "\(order.path)" ;;
-                *MARKER_NEW*) echo MARKER_NEW >> "\(order.path)" ;;
-              esac
-            done
-            printf 'OK'
-            """)
-        defer {
-            try? FileManager.default.removeItem(at: script)
-            try? FileManager.default.removeItem(at: order)
+        var order: [String] = []
+        useStubRunner { _, prompt, transcript, _, _, _, _ in
+            // The transcript text is the only thing that varies between our
+            // recordings — record which marker this call carried.
+            let blob = prompt + transcript
+            if blob.contains("MARKER_OLD") { order.append("MARKER_OLD") }
+            if blob.contains("MARKER_MID") { order.append("MARKER_MID") }
+            if blob.contains("MARKER_NEW") { order.append("MARKER_NEW") }
+            return "OK"
         }
 
         llm.tool = .claude
-        llm.executablePath = script.path
         summarizer.maxConcurrent = 1
 
         // Create three with explicit createdAt so the store's
@@ -277,17 +243,18 @@ final class RecordingSummarizerBackfillTests: XCTestCase {
 
         summarizer.backfillIfNeeded()
 
-        // Wait for all three to land.
-        try await waitForSummary(recordingID: oldest.id, timeoutSeconds: 120)
-        try await waitForSummary(recordingID: middle.id, timeoutSeconds: 120)
-        try await waitForSummary(recordingID: newest.id, timeoutSeconds: 120)
+        // Wait for all three to land. With maxConcurrent = 1 they run
+        // strictly serially: only the first is in flight at a time, the
+        // rest sit in `backfillQueue`, so poll on the summaries rather than
+        // awaiting tasks that don't exist yet.
+        try await waitForSummary(recordingID: oldest.id)
+        try await waitForSummary(recordingID: middle.id)
+        try await waitForSummary(recordingID: newest.id)
 
-        let log = try String(contentsOf: order, encoding: .utf8)
-        let lines = log.split(whereSeparator: \.isNewline).map(String.init)
-        guard let newIdx = lines.firstIndex(of: "MARKER_NEW"),
-              let midIdx = lines.firstIndex(of: "MARKER_MID"),
-              let oldIdx = lines.firstIndex(of: "MARKER_OLD") else {
-            XCTFail("Did not see all three markers; log was: \(log)")
+        guard let newIdx = order.firstIndex(of: "MARKER_NEW"),
+              let midIdx = order.firstIndex(of: "MARKER_MID"),
+              let oldIdx = order.firstIndex(of: "MARKER_OLD") else {
+            XCTFail("Did not see all three markers; order was: \(order)")
             return
         }
         XCTAssertLessThan(newIdx, midIdx, "Newest should be processed before Middle")
@@ -295,6 +262,16 @@ final class RecordingSummarizerBackfillTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// Rebuild `summarizer` with a deterministic `runLLM` stub. Call after
+    /// configuring `llm` / `liveAI` (and before `maxConcurrent` tweaks,
+    /// which are applied on the rebuilt instance).
+    private func useStubRunner(_ run: @escaping RecordingSummarizer.RunLLM) {
+        summarizer = RecordingSummarizer(store: store,
+                                         llmSettings: llm,
+                                         liveAISettings: liveAI,
+                                         runLLM: run)
+    }
 
     private func addRecording(title: String,
                               status: TranscriptionStatus,
@@ -321,25 +298,63 @@ final class RecordingSummarizerBackfillTests: XCTestCase {
         store.recordings.first { $0.id == id }?.summary
     }
 
-    private func waitForSummary(recordingID: UUID,
-                                timeoutSeconds: TimeInterval) async throws {
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
-        while Date() < deadline {
-            if let s = currentSummary(of: recordingID), !s.isEmpty {
-                return
-            }
-            try await Task.sleep(nanoseconds: 50_000_000)
+    /// Await a backfill summary that lands via the `$tool` Combine sink,
+    /// which hops through `DispatchQueue.main` before the task is created —
+    /// so there's no in-flight task to await synchronously at flip time.
+    /// The injected runner is instant, so this resolves in a couple of main
+    /// ticks; bounded so a regression fails fast instead of hanging.
+    private func waitForSummary(recordingID: UUID) async throws {
+        for _ in 0..<200 {
+            if let s = currentSummary(of: recordingID), !s.isEmpty { return }
+            // Let the scheduled main-queue sink + summary task run.
+            try await Task.sleep(nanoseconds: 5_000_000)
         }
         XCTFail("Timed out waiting for summary on \(recordingID)")
     }
+}
 
-    private func makeScript(_ body: String) -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("mila-backfill-test-\(UUID().uuidString).sh")
-        try? body.write(to: url, atomically: true, encoding: .utf8)
-        try? FileManager.default.setAttributes(
-            [.posixPermissions: 0o755], ofItemAtPath: url.path
-        )
-        return url
+/// In-process stand-in for the old "count concurrent shell scripts via probe
+/// files" trick. The stubbed runner calls `enterAndWait()` on entry, which
+/// bumps the live count (recording the peak) and then parks until
+/// `releaseAll()` is called — so the test can force the summarizer's
+/// concurrency cap to become observable without any subprocess or sleep.
+@MainActor
+final class ConcurrencyProbe {
+    private(set) var current = 0
+    private(set) var maxObserved = 0
+    private var parked: [CheckedContinuation<Void, Never>] = []
+    private var released = false
+    private var currentWaiters: [(target: Int, cont: CheckedContinuation<Void, Never>)] = []
+
+    func enterAndWait() async {
+        current += 1
+        maxObserved = max(maxObserved, current)
+        resolveCurrentWaiters()
+        if released {
+            current -= 1
+            return
+        }
+        await withCheckedContinuation { parked.append($0) }
+        current -= 1
+    }
+
+    /// Suspend until `current` reaches `target` (or return immediately if it
+    /// already has). Lets the test wait for the cap to fill deterministically.
+    func waitUntilCurrent(_ target: Int) async {
+        if current >= target { return }
+        await withCheckedContinuation { currentWaiters.append((target, $0)) }
+    }
+
+    func releaseAll() {
+        released = true
+        let pending = parked
+        parked.removeAll()
+        for c in pending { c.resume() }
+    }
+
+    private func resolveCurrentWaiters() {
+        let ready = currentWaiters.filter { current >= $0.target }
+        currentWaiters.removeAll { current >= $0.target }
+        for w in ready { w.cont.resume() }
     }
 }

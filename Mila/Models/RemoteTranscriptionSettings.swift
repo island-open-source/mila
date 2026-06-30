@@ -58,6 +58,11 @@ final class RemoteTranscriptionSettings: ObservableObject {
         didSet {
             guard backend != oldValue else { return }
             defaults.set(backend.rawValue, forKey: Keys.backend)
+            // Defer the Keychain read until the user actually switches to the
+            // remote backend (see `loadAPIKeyIfNeeded`). Local-only users never
+            // trigger the macOS "Mila wants to use confidential information"
+            // prompt because we never touch the Keychain for them.
+            if backend == .remote { loadAPIKeyIfNeeded() }
         }
     }
 
@@ -82,6 +87,10 @@ final class RemoteTranscriptionSettings: ObservableObject {
     @Published var apiKey: String {
         didSet {
             guard apiKey != oldValue else { return }
+            // Skip the write-back when we're just adopting the value we read
+            // from the Keychain — re-saving it would be a redundant write that
+            // could itself trigger a Keychain prompt.
+            guard !isAdoptingStoredAPIKey else { return }
             KeychainHelper.save(key: apiKeyKeychainKey, value: apiKey)
             testStatus = .idle
         }
@@ -98,6 +107,10 @@ final class RemoteTranscriptionSettings: ObservableObject {
     /// previews / alternate instances don't read or clobber the real app's
     /// `remote.apiKey` item (mirrors how `defaults` is injected).
     private let apiKeyKeychainKey: String
+    /// Whether the stored token has been read from the Keychain yet. Guards the
+    /// lazy load so it happens at most once, and so an explicit user edit before
+    /// the first switch to remote isn't clobbered by a later load.
+    private var hasLoadedAPIKey = false
 
     init(defaults: UserDefaults = .standard,
          urlSession: URLSession = .shared,
@@ -109,8 +122,42 @@ final class RemoteTranscriptionSettings: ObservableObject {
             ?? .local
         self.endpoint = defaults.string(forKey: Keys.endpoint) ?? Self.defaultEndpoint
         self.model = defaults.string(forKey: Keys.model) ?? Self.defaultModel
-        self.apiKey = KeychainHelper.load(key: apiKeyKeychainKey) ?? ""
+        // Start empty and defer the Keychain read. Reading the token at launch
+        // unconditionally pops the macOS "Mila wants to use confidential
+        // information stored in your keychain" prompt for *every* user — even
+        // the local-only majority who never configure a remote endpoint. We
+        // only read once the user actually selects the remote backend (here if
+        // it's the restored choice, otherwise lazily in `backend.didSet`).
+        self.apiKey = ""
+        if backend == .remote { loadAPIKeyIfNeeded() }
     }
+
+    /// Lazily read the bearer token from the Keychain the first time the remote
+    /// backend is selected. Idempotent (guarded by `hasLoadedAPIKey`) and
+    /// non-destructive: if the user has already typed a key we keep theirs
+    /// rather than overwrite it with the stored value.
+    private func loadAPIKeyIfNeeded() {
+        guard !hasLoadedAPIKey else { return }
+        hasLoadedAPIKey = true
+        // Don't clobber an in-progress edit. Only adopt the stored token when
+        // the in-memory field is still empty.
+        guard apiKey.isEmpty else { return }
+        guard let stored = KeychainHelper.load(key: apiKeyKeychainKey), !stored.isEmpty else { return }
+        // Assigning here triggers `apiKey.didSet`, but since `stored != ""` only
+        // when it differs from the current empty value, the write-through guard
+        // (`guard apiKey != oldValue`) lets it pass and re-saves the identical
+        // value. KeychainHelper.save is delete-then-add, so writing the same
+        // value back is harmless — but to avoid even that redundant Keychain
+        // write (which could itself prompt), suppress the write-through for this
+        // one assignment.
+        isAdoptingStoredAPIKey = true
+        apiKey = stored
+        isAdoptingStoredAPIKey = false
+    }
+
+    /// Set only while `loadAPIKeyIfNeeded` adopts the stored token, so the
+    /// `apiKey.didSet` write-through skips re-saving a value we just read.
+    private var isAdoptingStoredAPIKey = false
 
     /// True when the user has chosen the remote backend (regardless of whether
     /// it's fully configured). Drives routing in `TranscriptionService`.

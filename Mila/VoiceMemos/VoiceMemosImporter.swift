@@ -80,7 +80,24 @@ final class VoiceMemosImporter: ObservableObject {
 
     /// Apply the current settings: start/stop the watcher and trigger a sync.
     private func reconfigure() {
-        guard settings.isEnabled, settings.hasSelection, library.isAvailable else {
+        guard settings.isEnabled, settings.hasSelection else {
+            stop()
+            return
+        }
+        // Sync is on and folders are chosen, but the library may still be
+        // unreadable. Log *why* rather than silently bailing — a TCC / Full
+        // Disk Access denial is the one failure that otherwise leaves no
+        // trace in the logs at all (issue #45).
+        switch library.availability {
+        case .available:
+            break
+        case .databaseMissing:
+            log.notice("VoiceMemos sync is enabled but no library was found at \(self.library.databaseDisplayPath, privacy: .public) — nothing to sync (iCloud sync off, or no recordings yet).")
+            stop()
+            return
+        case .accessDenied(let reason):
+            log.error("VoiceMemos sync is enabled but macOS denied access to \(self.library.databaseDisplayPath, privacy: .public) (\(reason, privacy: .public)). Grant Mila Full Disk Access in System Settings → Privacy & Security → Full Disk Access.")
+            lastError = VoiceMemosLibrary.LibraryError.accessDenied(reason).localizedDescription
             stop()
             return
         }
@@ -96,7 +113,7 @@ final class VoiceMemosImporter: ObservableObject {
         }
         watcher.start()
         self.watcher = watcher
-        log.log("VoiceMemos watcher started on \(self.library.recordingsDirectory.path, privacy: .public)")
+        log.log("VoiceMemos watcher started on \(self.library.recordingsDirectoryDisplayPath, privacy: .public)")
     }
 
     /// Public entry point for the "Rescan now" button in Settings.

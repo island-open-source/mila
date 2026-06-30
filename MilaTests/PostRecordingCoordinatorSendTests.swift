@@ -33,6 +33,7 @@ final class PostRecordingCoordinatorSendTests: XCTestCase {
             store: store,
             modelManager: manager,
             diarizationSettings: DiarizationSettings(defaults: .init(suiteName: diarSuite)!),
+            remoteSettings: TestSupport.isolatedRemoteSettings(label: "PostRecordingCoordinatorSendTests"),
             engine: stub
         )
         coordinator = PostRecordingCoordinator(store: store, transcription: service,
