@@ -489,6 +489,13 @@ final class QuickActionsController: ObservableObject {
     private func armRemoteProbe() {
         remoteProbeTask?.cancel()
         remoteProbeTask = Task { [transcription] in
+            // `cancel()` above is cooperative, so a just-superseded probe can
+            // still get scheduled. Bail before touching `transcription` —
+            // `probeRemoteBackendIfActive()`'s active-but-unconfigured branch
+            // writes `lastError` synchronously, before any await/cancellation
+            // check, so without this guard a stale probe could surface an
+            // error for a recording the user has already moved past.
+            guard !Task.isCancelled else { return }
             await transcription.probeRemoteBackendIfActive()
         }
     }
