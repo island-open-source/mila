@@ -1,0 +1,291 @@
+name: E2E Hebrew Remote Transcription
+
+# Real end-to-end Hebrew transcription over HTTP: a Linux job runs the speaches
+# Docker image (an Apache-2.0 ivrit.ai Hebrew CT2 model, OpenAI-compatible on
+# :8000) and exposes it through an ephemeral cloudflared quick tunnel; the macOS
+# MilaTests job points Mila's real `RemoteWhisperEngine` at that tunnel URL and
+# asserts it gets correct Hebrew text back.
+#
+# WHY TWO JOBS + A TUNNEL
+# -----------------------
+# Mila must build with Xcode (macOS runner); Docker only runs on the Linux
+# runner. The two runners are separate VMs with no shared network, so we bridge
+# them with a no-account `*.trycloudflare.com` tunnel. The dynamic tunnel URL is
+# handed from the (long-running) server job to the parallel client job via a
+# workflow artifact the client polls for. The server job stays alive serving
+# until the client signals "done" (another artifact), then tears down.
+#
+# This is heavier and inherently more network-dependent than the default
+# `e2e-remote-transcription` mock-server E2E. It is path-gated and also
+# manually dispatchable so it doesn't run on every push.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'Mila/Transcription/RemoteWhisperEngine.swift'
+      - 'Mila/Models/RemoteTranscriptionSettings.swift'
+      - 'Mila/Transcription/TranscriptionService.swift'
+      - 'MilaTests/RemoteTranscriptionE2ETests.swift'
+      - 'docker/speaches-hebrew/**'
+      - '.github/workflows/e2e-hebrew-remote.yml'
+  pull_request:
+    paths:
+      - 'Mila/Transcription/RemoteWhisperEngine.swift'
+      - 'Mila/Models/RemoteTranscriptionSettings.swift'
+      - 'MilaTests/RemoteTranscriptionE2ETests.swift'
+      - 'docker/speaches-hebrew/**'
+      - '.github/workflows/e2e-hebrew-remote.yml'
+
+permissions:
+  contents: read
+  packages: read     # pull the speaches image from GHCR
+  actions: read       # poll run artifacts via the REST API (handoff channel)
+
+concurrency:
+  group: e2e-hebrew-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_BASENAME: mila-speaches-hebrew
+  TUNNEL_ARTIFACT: hebrew-tunnel-url
+  DONE_ARTIFACT: hebrew-client-done
+  HEBREW_MODEL: ivrit-ai/whisper-large-v3-turbo-ct2
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # SERVER: Linux. Runs the speaches container, opens a cloudflared quick tunnel,
+  # publishes the tunnel URL as an artifact, then stays alive serving until the
+  # client uploads the "done" artifact (or a hard timeout).
+  # ----------------------------------------------------------------------------
+  speaches-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lowercase image ref
+        id: img
+        run: |
+          owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          echo "ref=${{ env.REGISTRY }}/${owner}/${{ env.IMAGE_BASENAME }}:latest" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Start speaches container
+        run: |
+          docker run -d --name speaches -p 8000:8000 \
+            "${{ steps.img.outputs.ref }}"
+          echo "Waiting for speaches /health (model preload can take a few minutes)..."
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
+              echo "speaches is healthy"; exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::speaches did not become healthy"; docker logs speaches; exit 1
+
+      - name: Install cloudflared
+        run: |
+          curl -fsSL -o cloudflared \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+          sudo mv cloudflared /usr/local/bin/cloudflared
+          cloudflared --version
+
+      - name: Open quick tunnel and capture URL
+        id: tunnel
+        run: |
+          # No account/secret needed — quick tunnels mint a random
+          # *.trycloudflare.com hostname. cloudflared logs the URL to stderr.
+          cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8000 \
+            > tunnel.log 2>&1 &
+          echo $! > tunnel.pid
+          URL=""
+          for i in $(seq 1 60); do
+            URL=$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' tunnel.log | head -1 || true)
+            if [ -n "$URL" ]; then break; fi
+            sleep 2
+          done
+          if [ -z "$URL" ]; then
+            echo "::error::tunnel URL never appeared"; cat tunnel.log; exit 1
+          fi
+          echo "Tunnel URL: $URL"
+          # Verify the tunnel actually proxies to speaches before handing it off.
+          for i in $(seq 1 30); do
+            if curl -fsS "$URL/health" >/dev/null 2>&1; then
+              echo "tunnel reaches speaches /health"; break
+            fi
+            sleep 2
+          done
+          # The remote endpoint Mila expects is the OpenAI-style /v1 base.
+          printf '%s/v1' "$URL" > endpoint.txt
+          echo "endpoint=$(cat endpoint.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish tunnel URL for the client job
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.TUNNEL_ARTIFACT }}
+          path: endpoint.txt
+          retention-days: 1
+
+      # Keep the server alive while the macOS client runs. Poll the run's
+      # artifacts for the client's "done" marker; bail after a hard cap so a
+      # crashed client can't pin the runner for the full timeout.
+      - name: Serve until client done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Serving; waiting for client 'done' signal (max ~30 min)..."
+          for i in $(seq 1 180); do
+            count=$(gh api \
+              "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+              --jq "[.artifacts[] | select(.name == \"${{ env.DONE_ARTIFACT }}\")] | length" \
+              2>/dev/null || echo 0)
+            if [ "$count" != "0" ] && [ -n "$count" ]; then
+              echo "client signalled done"; exit 0
+            fi
+            # If speaches died, fail fast with logs rather than waiting it out.
+            if ! curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
+              echo "::error::speaches became unhealthy while serving"; docker logs speaches; exit 1
+            fi
+            sleep 10
+          done
+          echo "::warning::client never signalled done within the window"
+
+      - name: Teardown
+        if: always()
+        run: |
+          [ -f tunnel.pid ] && kill "$(cat tunnel.pid)" 2>/dev/null || true
+          echo "--- tunnel log ---"; cat tunnel.log 2>/dev/null || true
+          echo "--- speaches log (tail) ---"; docker logs --tail 100 speaches 2>/dev/null || true
+          docker rm -f speaches 2>/dev/null || true
+
+  # ----------------------------------------------------------------------------
+  # CLIENT: macOS. Builds Mila, polls for the tunnel URL artifact, points the
+  # real RemoteWhisperEngine at it, runs the Hebrew E2E test, then uploads the
+  # "done" marker so the server job can tear down.
+  # ----------------------------------------------------------------------------
+  mila-client:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Cache diarization bundle
+        id: diar-bundle-cache
+        uses: actions/cache@v4
+        with:
+          path: Mila/Resources/PythonRuntime
+          key: diar-bundle-${{ runner.os }}-${{ hashFiles('scripts/build-diarization-bundle.sh') }}
+
+      - name: Build diarization bundle (cold path only)
+        if: steps.diar-bundle-cache.outputs.cache-hit != 'true'
+        run: make bundle-diarization
+
+      - name: Generate Xcode project
+        run: make project
+
+      - name: Clear SwiftPM caches
+        run: |
+          rm -rf ~/Library/Caches/org.swift.swiftpm
+          rm -rf ~/Library/org.swift.swiftpm
+          rm -rf ~/Library/Developer/Xcode/DerivedData/SourcePackages
+
+      - name: Resolve Swift Package dependencies
+        run: |
+          xcodebuild \
+            -project Mila.xcodeproj \
+            -scheme Mila \
+            -destination 'platform=macOS' \
+            -resolvePackageDependencies
+
+      # Build the test bundle FIRST so the (slow) tunnel handoff overlaps the
+      # build instead of adding to it. build-for-testing leaves a ready bundle
+      # that `test-without-building` runs once we have the endpoint.
+      - name: Build for testing
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Mila.xcodeproj \
+            -scheme Mila \
+            -configuration Debug \
+            -derivedDataPath build \
+            -destination 'platform=macOS' \
+            -only-testing:MilaTests/RemoteTranscriptionE2ETests \
+            build-for-testing
+
+      - name: Wait for tunnel URL from server job
+        id: endpoint
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Polling for the '${{ env.TUNNEL_ARTIFACT }}' artifact..."
+          ART_ID=""
+          for i in $(seq 1 120); do   # up to ~20 min (server may bake/preload)
+            ART_ID=$(gh api \
+              "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+              --jq "[.artifacts[] | select(.name == \"${{ env.TUNNEL_ARTIFACT }}\")][0].id" \
+              2>/dev/null || true)
+            if [ -n "$ART_ID" ] && [ "$ART_ID" != "null" ]; then break; fi
+            sleep 10
+          done
+          if [ -z "$ART_ID" ] || [ "$ART_ID" = "null" ]; then
+            echo "::error::tunnel URL artifact never appeared"; exit 1
+          fi
+          gh api "repos/${{ github.repository }}/actions/artifacts/${ART_ID}/zip" > art.zip
+          unzip -o art.zip -d art >/dev/null
+          ENDPOINT=$(cat art/endpoint.txt)
+          echo "Endpoint: $ENDPOINT"
+          # Health-gate the tunnel from the client side before testing.
+          for i in $(seq 1 30); do
+            base="${ENDPOINT%/v1}"
+            if curl -fsS "${base}/health" >/dev/null 2>&1; then
+              echo "tunnel healthy from client"; break
+            fi
+            sleep 5
+          done
+          echo "endpoint=$ENDPOINT" >> "$GITHUB_OUTPUT"
+
+      - name: Run Hebrew remote E2E test
+        env:
+          # xcodebuild strips the TEST_RUNNER_ prefix and forwards the rest into
+          # the test process (same pattern as ci.yml / e2e-remote-transcription).
+          TEST_RUNNER_MILA_REMOTE_TEST_ENDPOINT: ${{ steps.endpoint.outputs.endpoint }}
+          TEST_RUNNER_MILA_REMOTE_HEBREW: "1"
+          TEST_RUNNER_MILA_REMOTE_MODEL: ${{ env.HEBREW_MODEL }}
+          TEST_RUNNER_MILA_REPO_ROOT: ${{ github.workspace }}
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Mila.xcodeproj \
+            -scheme Mila \
+            -configuration Debug \
+            -derivedDataPath build \
+            -destination 'platform=macOS' \
+            -only-testing:MilaTests/RemoteTranscriptionE2ETests \
+            test-without-building
+
+      - name: Signal server job to tear down
+        if: always()
+        run: |
+          mkdir -p done && date > done/done.txt
+          echo "uploading done marker"
+
+      - name: Upload done marker
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DONE_ARTIFACT }}
+          path: done/done.txt
+          retention-days: 1
