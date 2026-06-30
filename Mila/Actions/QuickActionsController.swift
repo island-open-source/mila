@@ -374,19 +374,7 @@ final class QuickActionsController: ObservableObject {
             activeJob = .recording(withSystemAudio: withSystemAudio)
             sleepGuard.preventIdleSleep(reason: "Mila is recording")
             startSilenceWatch(watching: source)
-            // Proactively verify a remote transcription backend now that
-            // capture is live. A bad key / unreachable endpoint otherwise
-            // stays invisible: the live path silently drops every utterance
-            // and the error only appears on the Stop batch pass (the user
-            // recorded a whole meeting before learning it failed). Non-blocking
-            // — recording already started and audio is being saved; this just
-            // races an error banner to the user. No-op for the local backend.
-            // Single-owner: cancel any prior probe so its (possibly stale)
-            // result can't overwrite UI state for this newer recording.
-            remoteProbeTask?.cancel()
-            remoteProbeTask = Task { [transcription] in
-                await transcription.probeRemoteBackendIfActive()
-            }
+            armRemoteProbe()
         } catch SystemAudioRecorder.CaptureError.permissionDenied {
             screenRecordingPermissionMissing = true
         } catch {
@@ -476,6 +464,7 @@ final class QuickActionsController: ObservableObject {
             activeJob = .recordingApp(processID: app?.processID, includeMic: includeMic)
             sleepGuard.preventIdleSleep(reason: "Mila is recording")
             startSilenceWatch(watching: source)
+            armRemoteProbe()
         } catch SystemAudioRecorder.CaptureError.permissionDenied {
             screenRecordingPermissionMissing = true
         } catch {
@@ -484,6 +473,23 @@ final class QuickActionsController: ObservableObject {
             } else {
                 transcription.lastError = "Could not start app recording: \(error.localizedDescription)"
             }
+        }
+    }
+
+    /// Proactively verify a remote transcription backend now that capture is
+    /// live. A bad key / unreachable endpoint otherwise stays invisible: the
+    /// live path silently drops every utterance and the error only appears on
+    /// the Stop batch pass (the user recorded a whole meeting before learning
+    /// it failed). Non-blocking — recording already started and audio is being
+    /// saved; this just races an error banner to the user. No-op for the local
+    /// backend. Single-owner: cancel any prior probe so its (possibly stale)
+    /// result can't overwrite UI state for this newer recording. Called from
+    /// every record-start entry point (mic/meeting and app-audio) so no live
+    /// path can fail silently. Cancelled in `stopRecording()`.
+    private func armRemoteProbe() {
+        remoteProbeTask?.cancel()
+        remoteProbeTask = Task { [transcription] in
+            await transcription.probeRemoteBackendIfActive()
         }
     }
 
