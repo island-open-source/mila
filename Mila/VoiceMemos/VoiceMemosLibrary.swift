@@ -41,14 +41,18 @@ struct VoiceMemosLibrary {
         recordingsDirectory.appendingPathComponent("CloudRecordings.db")
     }
 
-    /// `databaseURL.path` / `recordingsDirectory.path` with the home directory
-    /// shortened to `~`. The absolute form embeds the macOS account name, so
-    /// these are the variants safe to log at `.public` — they keep full
-    /// diagnostic value (which path Mila probed) without leaking a user
-    /// identifier into the unified log. See issue #45.
+    /// `databaseURL.path` with the home directory shortened to `~`. The
+    /// absolute form embeds the macOS account name, so this is the variant
+    /// safe to log at `.public` — it keeps full diagnostic value (which path
+    /// Mila probed) without leaking a user identifier into the unified log.
+    /// See issue #45.
     var databaseDisplayPath: String {
         (databaseURL.path as NSString).abbreviatingWithTildeInPath
     }
+
+    /// `recordingsDirectory.path` with the home directory shortened to `~`;
+    /// the `.public`-safe counterpart used by the watcher-started log line.
+    /// See `databaseDisplayPath`.
     var recordingsDirectoryDisplayPath: String {
         (recordingsDirectory.path as NSString).abbreviatingWithTildeInPath
     }

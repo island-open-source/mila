@@ -58,6 +58,8 @@ final class VoiceMemosLibraryTests: XCTestCase {
 
     // MARK: - Tests
 
+    /// A genuinely-absent DB classifies as `.databaseMissing` (not denied),
+    /// and reads throw the matching `.databaseMissing` error.
     func test_isAvailable_falseWhenDatabaseMissing() {
         let lib = VoiceMemosLibrary(recordingsDirectory: tempRoot)
         XCTAssertFalse(lib.isAvailable)
@@ -67,6 +69,7 @@ final class VoiceMemosLibraryTests: XCTestCase {
         }
     }
 
+    /// A present, readable fixture DB classifies as `.available`.
     func test_availability_availableForReadableDatabase() throws {
         let lib = try makeFixtureLibrary()
         XCTAssertEqual(lib.availability, .available)
