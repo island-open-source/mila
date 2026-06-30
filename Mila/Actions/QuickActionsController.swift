@@ -366,6 +366,14 @@ final class QuickActionsController: ObservableObject {
             activeJob = .recording(withSystemAudio: withSystemAudio)
             sleepGuard.preventIdleSleep(reason: "Mila is recording")
             startSilenceWatch(watching: source)
+            // Proactively verify a remote transcription backend now that
+            // capture is live. A bad key / unreachable endpoint otherwise
+            // stays invisible: the live path silently drops every utterance
+            // and the error only appears on the Stop batch pass (the user
+            // recorded a whole meeting before learning it failed). Non-blocking
+            // — recording already started and audio is being saved; this just
+            // races an error banner to the user. No-op for the local backend.
+            Task { [transcription] in await transcription.probeRemoteBackendIfActive() }
         } catch SystemAudioRecorder.CaptureError.permissionDenied {
             screenRecordingPermissionMissing = true
         } catch {

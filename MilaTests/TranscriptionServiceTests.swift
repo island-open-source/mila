@@ -37,6 +37,74 @@ final class TranscriptionServiceTests: XCTestCase {
         try await super.tearDown()
     }
 
+    // MARK: - Remote backend error surfacing
+    //
+    // Regression coverage for the silent-failure bug: a remote backend with a
+    // bad key (or unreachable endpoint) used to empty the live transcript with
+    // NO visible error — the failure only appeared on the Stop batch pass, and
+    // CI never caught it because the remote E2E suite only tested the happy
+    // path against an accepting mock. These tests pin the two new guards.
+
+    func test_probeRemoteBackendIfActive_isNoopForLocalBackend() async {
+        // The default `service` uses the on-device backend. Probing must do
+        // nothing — never touch the network or the Keychain, never error.
+        XCTAssertNil(service.lastError)
+        await service.probeRemoteBackendIfActive()
+        XCTAssertNil(service.lastError, "Local backend must not be probed")
+    }
+
+    func test_probeRemoteBackendIfActive_surfacesAuthFailure() async {
+        // The record-start probe must turn a 401 into an immediate, actionable
+        // error instead of a blank live pane discovered 13 minutes later.
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [Probe401URLProtocol.self]
+        let session = URLSession(configuration: config)
+        let suite = UserDefaults(suiteName: "TranscriptionServiceTests.probe401")!
+        suite.removePersistentDomain(forName: "TranscriptionServiceTests.probe401")
+        let keychainKey = "TranscriptionServiceTests.probe401.apiKey"
+        defer { KeychainHelper.delete(key: keychainKey) }
+        let remote = RemoteTranscriptionSettings(
+            defaults: suite, urlSession: session, apiKeyKeychainKey: keychainKey)
+        remote.backend = .remote
+        remote.endpoint = "https://api.openai.com/v1"
+        remote.apiKey = "test-key-123"
+        let svc = TranscriptionService(
+            store: store, modelManager: manager,
+            diarizationSettings: DiarizationSettings(defaults: .init(suiteName: "TranscriptionServiceTests.probe401.diar")!),
+            remoteSettings: remote, engine: StubWhisperEngine())
+
+        XCTAssertNil(svc.lastError)
+        await svc.probeRemoteBackendIfActive()
+        XCTAssertNotNil(svc.lastError, "A 401 at record-start must surface immediately")
+        XCTAssertTrue(svc.lastError?.contains("Settings") ?? false,
+                      "Error should point the user at Settings: \(svc.lastError ?? "nil")")
+    }
+
+    func test_liveRemoteFailure_setsLastError() async {
+        // The live/dictation path must surface a remote failure, not return a
+        // silently-empty result indistinguishable from "no speech detected".
+        let suite = UserDefaults(suiteName: "TranscriptionServiceTests.liveRemoteFail")!
+        suite.removePersistentDomain(forName: "TranscriptionServiceTests.liveRemoteFail")
+        let keychainKey = "TranscriptionServiceTests.liveRemoteFail.apiKey"
+        defer { KeychainHelper.delete(key: keychainKey) }
+        let remote = RemoteTranscriptionSettings(
+            defaults: suite, apiKeyKeychainKey: keychainKey)
+        remote.backend = .remote
+        // Self-hosted endpoint → isConfigured without a key, so routing reaches
+        // the (injected, always-throwing) remote engine.
+        remote.endpoint = "http://localhost:8080/v1"
+        let svc = TranscriptionService(
+            store: store, modelManager: manager,
+            diarizationSettings: DiarizationSettings(defaults: .init(suiteName: "TranscriptionServiceTests.liveRemoteFail.diar")!),
+            remoteSettings: remote, engine: StubWhisperEngine(),
+            remoteEngine: ThrowingRemoteEngine())
+
+        XCTAssertNil(svc.lastError)
+        let segs = await svc.transcribeOnceSegments(samples: [0.1, 0.2, 0.3], language: "he", audioCtx: nil)
+        XCTAssertTrue(segs.isEmpty, "A remote failure yields no segments")
+        XCTAssertNotNil(svc.lastError, "A live remote failure must surface, not silently empty the pane")
+    }
+
     // MARK: - Single recording happy path
 
     func test_enqueue_single_recording_marks_running_then_completed() async throws {
@@ -501,5 +569,39 @@ final class TranscriptionServiceTests: XCTestCase {
         XCTAssertEqual(normalized[0].speaker, "SPEAKER_00")
         XCTAssertNil(normalized[1].speaker)
         XCTAssertEqual(normalized[2].speaker, "SPEAKER_01")
+    }
+}
+
+/// Returns 401 for any request — lets the record-start probe reach `.failed`
+/// without a real server. (Distinct from `RemoteTranscriptionTests`' copy so
+/// each test file is self-contained.)
+private final class Probe401URLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let response = HTTPURLResponse(url: request.url!, statusCode: 401,
+                                       httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"error":{"message":"Incorrect API key provided: test-key-123"}}"#.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+/// A remote engine that always throws an HTTP 401 — stands in for a
+/// misconfigured remote backend so the live-path error-surfacing can be tested
+/// without a network round-trip.
+private actor ThrowingRemoteEngine: RemoteTranscribing {
+    func configure(_ config: RemoteTranscriptionConfig) async {}
+    func loadIfNeeded(modelURL: URL, displayName: String) async throws {}
+    func shutdown() async {}
+    func transcribe(samples: [Float],
+                    language: String,
+                    audioCtx: Int32?,
+                    progress: (@Sendable (Float) -> Void)?,
+                    isCancelled: (@Sendable () -> Bool)?) async throws -> [TranscriptSegment] {
+        throw RemoteWhisperEngine.RemoteError.http(
+            status: 401,
+            body: #"{"error":{"message":"Incorrect API key provided: test-key-123"}}"#)
     }
 }

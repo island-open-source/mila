@@ -173,6 +173,34 @@ final class RemoteTranscriptionSettingsTests: XCTestCase {
         settings.endpoint = "https://example.com/v2"
         XCTAssertEqual(settings.testStatus, .idle, "Editing the endpoint must reset the status")
     }
+
+    func test_testConnection_failsOnAuthError() async {
+        // A 401 from /models must surface as .failed with an actionable
+        // "check the API key" message. This is the guard that would have
+        // caught a bad key (e.g. `test-key-123`) at record-start — BEFORE a
+        // whole recording was silently lost to per-utterance 401s. Its
+        // absence is why CI never flagged the original bug: the remote E2E
+        // suite only ever exercised the happy path against an accepting mock.
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [Stub401URLProtocol.self]
+        let session = URLSession(configuration: config)
+        let suite = UserDefaults(suiteName: "RemoteTranscriptionSettingsTests.auth401")!
+        suite.removePersistentDomain(forName: "RemoteTranscriptionSettingsTests.auth401")
+        let keychainKey = "RemoteTranscriptionSettingsTests.auth401.apiKey"
+        defer { KeychainHelper.delete(key: keychainKey) }
+        let settings = RemoteTranscriptionSettings(
+            defaults: suite, urlSession: session, apiKeyKeychainKey: keychainKey)
+        settings.backend = .remote
+        settings.endpoint = "https://api.openai.com/v1"
+        settings.apiKey = "test-key-123"
+
+        await settings.testConnection()
+
+        guard case .failed(let message) = settings.testStatus else {
+            return XCTFail("Expected .failed for a 401, got \(settings.testStatus)")
+        }
+        XCTAssertTrue(message.contains("401"), "Failure should name the status code: \(message)")
+    }
 }
 
 /// Returns 200 for any request — lets `testConnection()` reach `.ok` without a
@@ -185,6 +213,20 @@ private final class StubOKURLProtocol: URLProtocol {
                                        httpVersion: nil, headerFields: nil)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data("{}".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+/// Returns 401 with an OpenAI-style error body — simulates a bad API key.
+private final class Stub401URLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let response = HTTPURLResponse(url: request.url!, statusCode: 401,
+                                       httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"error":{"message":"Incorrect API key provided: test-key-123"}}"#.utf8))
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
