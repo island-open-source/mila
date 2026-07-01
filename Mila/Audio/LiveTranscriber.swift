@@ -3,7 +3,7 @@ import Combine
 import OSLog
 import TranscriptionCore
 
-private let liveLog = Logger(subsystem: "io.island.whisper.IslandWhisper", category: "LiveTranscriber")
+private let liveLog = MilaLog(category: "LiveTranscriber")
 
 /// Per-tick output of the live transcriber. Kept around for back-compat
 /// with `LiveSpeakerDiarizer` (which still publishes intervals that view

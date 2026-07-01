@@ -3,8 +3,7 @@ import Combine
 import CryptoKit
 import os.log
 
-private let modelLogger = Logger(subsystem: "io.island.mila.Mila",
-                                 category: "models")
+private let modelLogger = MilaLog(category: "models")
 
 /// Catalog of supported ggml models. Add more here as needed.
 struct WhisperModel: Identifiable, Hashable, Codable {

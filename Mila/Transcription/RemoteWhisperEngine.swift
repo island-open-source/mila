@@ -2,8 +2,7 @@ import Foundation
 import OSLog
 import TranscriptionCore
 
-private let remoteLog = Logger(subsystem: "io.island.whisper.IslandWhisper",
-                               category: "RemoteWhisperEngine")
+private let remoteLog = MilaLog(category: "RemoteWhisperEngine")
 
 /// Injection seam for `TranscriptionService`: the remote engine refines
 /// `TranscribingEngine` with the remote-specific `configure(_:)` step the

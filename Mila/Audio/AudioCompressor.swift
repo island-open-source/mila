@@ -2,7 +2,7 @@ import Foundation
 import AVFoundation
 import OSLog
 
-private let compressorLog = Logger(subsystem: "io.island.whisper.IslandWhisper", category: "AudioCompressor")
+private let compressorLog = MilaLog(category: "AudioCompressor")
 
 /// Transcodes recordings from the on-disk WAV (written live during a
 /// session — crash-recoverable, which the launch recovery relies on) to

@@ -27,8 +27,7 @@ import OSLog
 /// joined a meeting" notification.
 @MainActor
 final class MeetingDetector: ObservableObject {
-    private static let log = Logger(
-        subsystem: "io.island.whisper.IslandWhisper", category: "MeetingDetector")
+    private static let log = MilaLog(category: "MeetingDetector")
 
     /// One supported app. `bundleID` is the canonical ID used for the
     /// prompt's snooze / silence keys and display; `captureBundlePrefixes`

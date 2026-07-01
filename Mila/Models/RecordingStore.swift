@@ -2,7 +2,7 @@ import Foundation
 import Combine
 import OSLog
 
-private let recStoreLog = Logger(subsystem: "io.island.whisper.IslandWhisper", category: "RecordingStore")
+private let recStoreLog = MilaLog(category: "RecordingStore")
 
 /// Persists recordings + their metadata under Application Support/Mila.
 ///

@@ -3,7 +3,7 @@ import AVFoundation
 import Combine
 import os
 
-private let micLog = Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MicrophoneRecorder")
+private let micLog = MilaLog(category: "MicrophoneRecorder")
 
 enum MicrophoneError: Error, Equatable {
     case noInputDevice

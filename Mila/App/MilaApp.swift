@@ -5,6 +5,36 @@ import OSLog
 import Sparkle
 import TranscriptionCore
 
+/// Redirect `stdout`/`stderr` to `~/Library/Logs/Mila/mila.log` so the app's
+/// many `print(...)` diagnostics (transcription progress, errors) — plus the
+/// inherited stderr of whisper.cpp and the pyannote Python subprocess — are
+/// persisted to a real file. GUI apps launched from Finder otherwise discard
+/// stdout/stderr entirely, leaving no logs to debug failures with.
+///
+/// Called as the very first thing in `MilaApp.init()`. Skipped when attached to
+/// a terminal (Xcode/CLI) so the dev console keeps working. The streams are set
+/// line-/un-buffered so entries appear promptly instead of only on exit.
+func redirectMilaLogsToFile() {
+    // Don't hijack the console when running under Xcode or a terminal.
+    guard isatty(STDERR_FILENO) == 0 else { return }
+    let fm = FileManager.default
+    guard let dir = fm.urls(for: .libraryDirectory, in: .userDomainMask).first?
+        .appendingPathComponent("Logs/Mila", isDirectory: true) else { return }
+    try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    let file = dir.appendingPathComponent("mila.log")
+    // Simple rotation: start fresh if the file grew past ~5 MB.
+    if let size = (try? fm.attributesOfItem(atPath: file.path)[.size]) as? Int, size > 5_000_000 {
+        try? fm.removeItem(at: file)
+    }
+    freopen(file.path, "a", stdout)
+    freopen(file.path, "a", stderr)
+    setvbuf(stdout, nil, _IOLBF, 0)   // line-buffered
+    setvbuf(stderr, nil, _IONBF, 0)   // unbuffered
+    let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+    let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+    print("=== Mila launched \(ISO8601DateFormatter().string(from: Date())) (v\(version) build \(build)) ===")
+}
+
 /// Wraps Sparkle's `SPUStandardUpdaterController` so SwiftUI menu items can
 /// observe `canCheckForUpdates` and disable themselves while a check is
 /// already in flight. Created once at app launch — Sparkle starts its
@@ -238,6 +268,9 @@ struct MilaApp: App {
     @StateObject private var updater = UpdaterViewModel()
 
     init() {
+        // FIRST: capture stdout/stderr to a log file (see helper above) so the
+        // app's print(...) diagnostics survive a Finder launch.
+        redirectMilaLogsToFile()
         // RecordingStore's no-arg init handles the legacy migration and
         // opens at the default Application Support location. The
         // storage-settings instance owns the security-scoped bookmark
@@ -335,7 +368,7 @@ struct MilaApp: App {
         // than inside its init so the seed doesn't depend on whatever
         // order Swift evaluates the @MainActor isolation of init vs
         // CommandLine population — putting it here makes it deterministic.
-        os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+        MilaLog(category: "MilaApp")
             .log("MilaApp.init args=\(CommandLine.arguments.joined(separator: " "), privacy: .public)")
         // UI-test launch args that override persisted settings so the
         // workflow can pick the recording language without depending on
@@ -390,7 +423,7 @@ struct MilaApp: App {
                             text: "ונחלק את העבודה בין החברים",
                             speaker: nil, stable: true)
             ])
-            os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+            MilaLog(category: "MilaApp")
                 .log("seeded \(liveTrans.segments.count, privacy: .public) Hebrew segments for UI test")
         }
         let liveDiar = LiveSpeakerDiarizer()
@@ -645,7 +678,7 @@ struct MilaApp: App {
         // Give the fake recording a moment to flip `actions.isRecording`.
         try? await Task.sleep(nanoseconds: 300_000_000)
         if let zoom = MeetingDetector.supportedApps.first {
-            os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+            MilaLog(category: "MilaApp")
                 .log("simulate-meeting-ended: firing meetingEnded for \(zoom.displayName, privacy: .public)")
             meetingDetector.meetingEnded.send(zoom)
         }
@@ -687,7 +720,7 @@ struct MilaApp: App {
         }) else { return }
         let wavPath = String(arg.dropFirst("--ui-test-inject-fixture-wav=".count))
         guard FileManager.default.fileExists(atPath: wavPath) else {
-            os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+            MilaLog(category: "MilaApp")
                 .log("inject-fixture: WAV missing at \(wavPath, privacy: .public)")
             return
         }
@@ -717,7 +750,7 @@ struct MilaApp: App {
             if sessionRef.onLiveSamples != nil { break }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
-        os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+        MilaLog(category: "MilaApp")
             .log("inject-fixture: pumping \(wavPath, privacy: .public) agc=\(agcEnabled ? "on" : "off", privacy: .public)")
         await Self.pumpFixtureWAV(path: wavPath, to: sessionRef, agcEnabled: agcEnabled)
     }
@@ -763,7 +796,7 @@ struct MilaApp: App {
         }) else { return }
         let wavPath = String(arg.dropFirst("--ui-test-inject-fixture-wav=".count))
         guard FileManager.default.fileExists(atPath: wavPath) else {
-            os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+            MilaLog(category: "MilaApp")
                 .log("finalize-regression: WAV missing at \(wavPath, privacy: .public)")
             return
         }
@@ -776,7 +809,7 @@ struct MilaApp: App {
             switch state {
             case .recording:
                 guard pumpTask == nil else { break }
-                os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+                MilaLog(category: "MilaApp")
                     .log("finalize-regression: .recording — arming one-shot fixture pump")
                 pumpTask = Task { @MainActor in
                     // Wait for wireLiveAIPipeline to install onLiveSamples
@@ -806,7 +839,7 @@ struct MilaApp: App {
                                            agcEnabled: Bool) async {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let (samples, sampleRate) = Self.decodeWAV(data: data) else {
-            os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+            MilaLog(category: "MilaApp")
                 .log("finalize-regression: failed to decode WAV at \(path, privacy: .public)")
             return
         }
@@ -853,7 +886,7 @@ struct MilaApp: App {
         // but parsing it lets us tolerate fmt chunks of different
         // sizes (e.g. with an `fact` chunk for float WAVs).
         guard let (samples, sampleRate) = Self.decodeWAV(data: data) else {
-            os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+            MilaLog(category: "MilaApp")
                 .log("inject-fixture: failed to decode WAV at \(path, privacy: .public)")
             return
         }
@@ -893,7 +926,7 @@ struct MilaApp: App {
                     try? await Task.sleep(nanoseconds: napNs)
                 }
             }
-            os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+            MilaLog(category: "MilaApp")
                 .log("inject-fixture: looping, pumped=\(pumped, privacy: .public) samples so far gain=\(agc.currentGain, privacy: .public)")
         }
     }
@@ -1055,7 +1088,7 @@ struct MilaApp: App {
                     // to a recording that never ran the LLM loop.
                     // Cursor flagged on c95d2bb.
                     aiSession.cancel()
-                    os.Logger(subsystem: "io.island.whisper.IslandWhisper", category: "MilaApp")
+                    MilaLog(category: "MilaApp")
                         .log("wireLiveAIPipeline: .recording skipped — hardware below Live AI bar (model=\(aiSettings.capabilities.marketingName, privacy: .public))")
                     continue
                 }

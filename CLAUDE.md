@@ -50,6 +50,30 @@ These patches live in `SpeakerDiarizer.swift`'s inline diarize script. If upgrad
 - `TranscriptionService` now requires a `diarizationSettings:` parameter. In tests, always pass `DiarizationSettings(defaults: .init(suiteName: "TestClassName.diarization")!)` to isolate from user defaults.
 - Run tests with `make test` or via Xcode.
 
+### Logging
+- **Where:** the app writes a plain-text log to `~/Library/Logs/Mila/mila.log`.
+  Tail it with `make logs`. It is truncated when it grows past ~5 MB.
+- **When it's active:** file logging is set up by `redirectMilaLogsToFile()` (the
+  first line of `MilaApp.init()`), which redirects `stdout`/`stderr` to the file.
+  It is **skipped when the app is attached to a TTY** (`guard isatty(STDERR_FILENO) == 0`)
+  so that running under Xcode or a terminal still prints to the console. Practical
+  upshot: a **Finder/`open` launch logs to the file** (use `make reinstall`), but a
+  terminal launch (e.g. `make run`, or running the binary directly) does **not** —
+  it prints to the console instead.
+- **Scope (what lands in the file):**
+  1. Every `print(...)` in the app (most transcription-pipeline diagnostics).
+  2. Every `MilaLog` call. `MilaLog` (see `Mila/App/MilaLog.swift`) is the
+     app-wide logger that replaced raw `os.Logger`; it mirrors each entry to
+     **both** the unified log (`os.Logger`, subsystem `io.island.whisper.IslandWhisper`)
+     **and** stdout, so subsystem logs (VoiceMemos, ModelManager, MeetingDetector,
+     RemoteWhisperEngine, etc.) appear in the file prefixed with `[Category]`.
+- **New logging:** prefer `MilaLog` over `os.Logger`/`print` for new code so output
+  reaches both sinks. It accepts the same interpolation as `os.Logger`, including
+  `"\(value, privacy: .public)"`.
+- **Unified log alternative:** os_log entries are also visible in Console.app or via
+  `log show --predicate 'subsystem == "io.island.whisper.IslandWhisper"' --info`
+  (note: `.info`/`.debug` levels are not persisted by default).
+
 ## Release Process
 - **Release notes are REQUIRED, first.** Every release must add
   `RELEASE_NOTES/v<MARKETING_VERSION>.md` (Markdown, user-facing). This file

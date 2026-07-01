@@ -3,7 +3,7 @@ import Combine
 import OSLog
 import TranscriptionCore
 
-private let serviceLog = Logger(subsystem: "io.island.whisper.IslandWhisper", category: "TranscriptionService")
+private let serviceLog = MilaLog(category: "TranscriptionService")
 
 /// Coordinates batch transcription of recordings + one-shot transcription
 /// for dictation.

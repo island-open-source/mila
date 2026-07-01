@@ -2,7 +2,7 @@ import Foundation
 import Combine
 import OSLog
 
-private let liveAILog = Logger(subsystem: "io.island.whisper.IslandWhisper", category: "LiveAISession")
+private let liveAILog = MilaLog(category: "LiveAISession")
 
 /// Drives the LLM half of Live AI mode. Holds an action-item list, fires a
 /// debounced one-shot LLM call against the latest transcript on each tick,

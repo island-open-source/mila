@@ -2,8 +2,7 @@ import Foundation
 import Combine
 import OSLog
 
-private let postRecordingLog = Logger(subsystem: "io.island.whisper.IslandWhisper",
-                                      category: "PostRecordingCoordinator")
+private let postRecordingLog = MilaLog(category: "PostRecordingCoordinator")
 
 /// Owns the "Name this recording" sheet lifecycle. The sheet pops the moment
 /// a recording is added (i.e. recording stopped) — NOT when transcription

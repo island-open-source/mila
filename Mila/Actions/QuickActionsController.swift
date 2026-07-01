@@ -7,8 +7,7 @@ import UniformTypeIdentifiers
 import AVFoundation
 import TranscriptionCore
 
-private let quickActionsLog = Logger(subsystem: "io.island.whisper.IslandWhisper",
-                                     category: "QuickActionsController")
+private let quickActionsLog = MilaLog(category: "QuickActionsController")
 
 /// Single entry point used by the Home tiles + sidebar buttons.
 /// Hides recording/transcription orchestration from the UI layer.

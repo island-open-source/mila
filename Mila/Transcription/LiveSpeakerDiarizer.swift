@@ -2,7 +2,7 @@ import Foundation
 import Combine
 import OSLog
 
-private let diarLog = Logger(subsystem: "io.island.whisper.IslandWhisper", category: "LiveSpeakerDiarizer")
+private let diarLog = MilaLog(category: "LiveSpeakerDiarizer")
 
 /// Streams speaker labels during a live recording by sending 5 s WAV chunks
 /// to a long-running Python daemon that computes a pyannote/wespeaker

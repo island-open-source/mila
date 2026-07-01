@@ -301,7 +301,7 @@ struct LiveAIRecordingView: View {
                     // grew ~linearly with recording length. Lazy keeps it
                     // O(visible) — flat regardless of transcript size.
                     LazyVStack(alignment: .leading, spacing: 6) {
-                        let _ = Logger(subsystem: "io.island.whisper.IslandWhisper", category: "LiveAIRecordingView")
+                        let _ = MilaLog(category: "LiveAIRecordingView")
                             .log("render segments.count=\(transcriber.segments.count, privacy: .public)")
                         if transcriber.segments.isEmpty {
                             Text("Listening…")

@@ -2,8 +2,7 @@ import Foundation
 import Combine
 import OSLog
 
-private let summarizerLog = Logger(subsystem: "io.island.whisper.IslandWhisper",
-                                   category: "RecordingSummarizer")
+private let summarizerLog = MilaLog(category: "RecordingSummarizer")
 
 /// Fires a one-shot LLM call against a finished recording's transcript and
 /// stores the result on the `Recording.summary` field.

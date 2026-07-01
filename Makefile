@@ -1,4 +1,4 @@
-.PHONY: all bootstrap project open build test run clean models models-coreml-tiny help dmg release-build e2e package-test bundle-diarization verify-ane
+.PHONY: all bootstrap project open build test run clean models models-coreml-tiny help dmg release-build e2e package-test bundle-diarization verify-ane reinstall logs
 
 XCODEPROJ := Mila.xcodeproj
 SCHEME := Mila
@@ -22,6 +22,8 @@ help:
 	@echo "  release-build - Release build into $(RELEASE_DERIVED)"
 	@echo "  test          - Run the MilaTests XCTest target"
 	@echo "  run           - Build and launch the app"
+	@echo "  reinstall     - Release-build, replace /Applications/Mila.app, and launch (engages file logging)"
+	@echo "  logs          - Tail the app log at ~/Library/Logs/Mila/mila.log"
 	@echo "  models        - Pre-download both ggml models into ~/Library/Application Support/Mila/Models"
 	@echo "  models-coreml-tiny - Download ggml-tiny + sibling -encoder.mlmodelc into ~/.cache/whisper-coreml-test/ (for CI ANE verification test)"
 	@echo "  dmg           - Build a release DMG ($(DMG)) suitable for upload"
@@ -59,6 +61,26 @@ test: project
 
 run: build
 	open $(APP)
+
+# Local dev loop for testing file logging: build a release, replace the
+# installed app, and launch it via `open` (NOT a terminal) so the stdout->file
+# redirect in MilaApp.init() engages. Logs land at ~/Library/Logs/Mila/mila.log.
+# User recordings/models/settings under Application Support are untouched.
+reinstall: release-build
+	@echo "Replacing /Applications/Mila.app with fresh release build..."
+	@pkill -x Mila 2>/dev/null || true
+	@if [ -e /Applications/Mila.app ]; then \
+		command -v trash >/dev/null 2>&1 && trash /Applications/Mila.app || rm -rf /Applications/Mila.app; \
+	fi
+	cp -R "$(RELEASE_APP)" /Applications/
+	@echo "Installed (ad-hoc signed). Launching via Finder so file logging engages..."
+	open -a /Applications/Mila.app
+
+# Tail the app log. File logging is only active for Finder/`open` launches
+# (it is skipped when the app is started from a TTY, e.g. via `make run`).
+logs:
+	@touch "$(HOME)/Library/Logs/Mila/mila.log" 2>/dev/null || true
+	@tail -f "$(HOME)/Library/Logs/Mila/mila.log"
 
 # Local (self-hosted) check: verify an upgrade doesn't recompile the CoreML/ANE
 # encoder. Needs a real Neural Engine + an installed model + a GUI session, so

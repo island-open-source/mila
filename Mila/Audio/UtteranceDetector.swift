@@ -1,7 +1,7 @@
 import Foundation
 import OSLog
 
-private let vadLog = Logger(subsystem: "io.island.whisper.IslandWhisper", category: "VAD")
+private let vadLog = MilaLog(category: "VAD")
 
 /// RMS-based voice-activity detector. Ingests mono16k PCM frames and
 /// emits a complete utterance (samples + recording-time start) when a

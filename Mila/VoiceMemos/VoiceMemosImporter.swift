@@ -26,7 +26,7 @@ final class VoiceMemosImporter: ObservableObject {
     private let languageSettings: RecordingLanguageSettings
     private let library: VoiceMemosLibrary
 
-    private let log = Logger(subsystem: "io.island.whisper.IslandWhisper", category: "VoiceMemos")
+    private let log = MilaLog(category: "VoiceMemos")
 
     /// Last successful sync timestamp, for the Settings status line.
     @Published private(set) var lastSyncDate: Date?

@@ -5,7 +5,7 @@ import OSLog
 import ScreenCaptureKit
 import TranscriptionCore
 
-private let recLog = Logger(subsystem: "io.island.whisper.IslandWhisper", category: "RecordingSession")
+private let recLog = MilaLog(category: "RecordingSession")
 
 /// Orchestrates microphone + system audio capture into a single mono 16kHz WAV file.
 @MainActor
